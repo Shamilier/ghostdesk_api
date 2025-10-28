@@ -34,6 +34,102 @@ function logAuthUsage(endpoint: string, token: string | null) {
   console.log(`[auth] ${endpoint} token=${masked}`);
 }
 
+function formatSmartText(text: string, smart: boolean): string {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  return smart ? `[SMART] ${trimmed}` : trimmed;
+}
+
+function buildTranscriptBlock(transcript: string): string {
+  const body = transcript.trim();
+  if (!body) return "";
+  return (
+    "Последние реплики (автотранскрибировано, возможны ошибки):\n" +
+    body +
+    "\n---\nПродолжи беседу по правилам системного промпта и ответь на вопросы."
+  );
+}
+
+type AskStreamConfig = {
+  res: express.Response;
+  sessionId: string;
+  user: ChatMsg;
+  debugLabel: string;
+  maxTokens?: number;
+  temperature?: number;
+};
+
+async function streamAskLikeResponse({
+  res,
+  sessionId,
+  user,
+  debugLabel,
+  maxTokens = 500,
+  temperature = 0.2,
+}: AskStreamConfig) {
+  const history = sessions.get(sessionId) ?? [];
+  const messages: ChatMsg[] = [
+    { role: "system", content: defaultAskSystemPrompt },
+    ...history,
+    user,
+  ];
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  (res as any).flushHeaders?.();
+  res.write(": connected\n\n");
+
+  push(sessionId, user);
+
+  const stream = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    stream: true,
+    max_tokens: maxTokens,
+    temperature,
+    messages: messages as any,
+  });
+
+  let full = "";
+  let firstChunkLogged = false;
+
+  for await (const chunk of stream) {
+    if (!firstChunkLogged) {
+      firstChunkLogged = true;
+      console.log(`${debugLabel} FIRST CHUNK:`, JSON.stringify(chunk, null, 2));
+    }
+
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+
+    const delta = choice.delta as any;
+
+    if (typeof delta?.content === "string") {
+      const text = delta.content as string;
+      if (text) {
+        full += text;
+        res.write(`data: ${JSON.stringify({ type: "delta", text })}\n\n`);
+      }
+      continue;
+    }
+
+    const parts = delta?.content;
+    if (Array.isArray(parts)) {
+      for (const p of parts) {
+        if (p?.type === "text" && typeof p.text === "string" && p.text.length) {
+          full += p.text;
+          res.write(`data: ${JSON.stringify({ type: "delta", text: p.text })}\n\n`);
+        }
+      }
+    }
+  }
+
+  push(sessionId, { role: "assistant", content: full });
+  res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+  res.end();
+}
+
 // -------------------- App & middleware --------------------
 const app = express();
 const upload = multer({ limits: { fileSize: 3 * 1024 * 1024 } }); // PNG до ~3 МБ
@@ -150,6 +246,12 @@ app.post("/hint", async (req, res) => {
     const sessionId = String(req.body?.sessionId ?? "default");
     const instruction = String(req.body?.instruction ?? "").trim();
     const context = String(req.body?.context ?? "").trim();
+    const intent =
+      typeof req.body?.intent === "string" && req.body.intent.trim().length > 0
+        ? req.body.intent.trim()
+        : "default";
+
+    console.log(`[hint] session=${sessionId} intent=${intent}`);
 
     if (!context) return res.status(400).json({ error: "Empty context" });
 
@@ -284,6 +386,10 @@ app.post("/ask", upload.single("image"), async (req, res) => {
     const question = String(req.body.question ?? "").trim();
     const smart = String(req.body.smart ?? "false") === "true";
     const sessionId = String(req.body.sessionId ?? "default");
+    const transcript =
+      typeof req.body?.transcript === "string"
+        ? req.body.transcript.trim()
+        : "";
 
     if (!question) return res.status(400).json({ error: "Empty question" });
     if (!req.file) return res.status(400).json({ error: "No image" });
@@ -291,85 +397,88 @@ app.post("/ask", upload.single("image"), async (req, res) => {
     const b64 = req.file.buffer.toString("base64");
     const dataUrl = `data:image/png;base64,${b64}`;
 
-    const system: ChatMsg = {
-      role: "system",
-      content: defaultAskSystemPrompt,
-    };
+    const content: ChatMsg["content"] = [
+      { type: "text", text: formatSmartText(question, smart) },
+    ];
+
+    if (transcript) {
+      const block = buildTranscriptBlock(transcript);
+      if (block) {
+        content.push({ type: "text", text: block });
+      }
+    }
+
+    content.push({ type: "image_url", image_url: { url: dataUrl } });
 
     const user: ChatMsg = {
       role: "user",
-      content: [
-        { type: "text", text: smart ? `[SMART] ${question}` : question },
-        { type: "image_url", image_url: { url: dataUrl } },
-      ],
+      content,
     };
 
-    const history = sessions.get(sessionId) ?? [];
-    const messages: ChatMsg[] = [system, ...history, user];
-
-    // SSE заголовки (стрим)
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-
-    // фиксируем user-сообщение сразу
-    push(sessionId, user);
-
-    // Стриминг ответа (Chat Completions с vision)
-    const stream = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      stream: true,
-      max_tokens: 500, // достаточно для кратких ответов
+    await streamAskLikeResponse({
+      res,
+      sessionId,
+      user,
+      debugLabel: "/ask",
+      maxTokens: 500,
       temperature: 0.2,
-      messages: messages as any, // совместимо с SDK
     });
+  } catch (e: any) {
+    if (!res.headersSent) {
+      return res.status(500).json({ error: e?.message ?? "Internal error" });
+    }
+    try {
+      res.write(
+        `data: ${JSON.stringify({ type: "error", message: String(e?.message ?? e) })}\n\n`
+      );
+    } finally {
+      res.end();
+    }
+  }
+});
 
-    // Принудительно отправим заголовки и heartbeat, чтобы избежать буферизации
-    (res as any).flushHeaders?.();
-    res.write(": connected\n\n");
+app.post("/ask_without_query", upload.single("image"), async (req, res) => {
+  try {
+    const token = readAuthKey(req);
+    logAuthUsage("/ask_without_query", token);
 
-    let full = "";
-    let firstChunkLogged = false;
+    const smart = String(req.body.smart ?? "false") === "true";
+    const sessionId = String(req.body.sessionId ?? "default");
+    const question =
+      typeof req.body?.question === "string" ? req.body.question.trim() : "";
+    const transcript =
+      typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
 
-    for await (const chunk of stream) {
-      if (!firstChunkLogged) {
-        firstChunkLogged = true;
-        console.log("FIRST CHUNK:", JSON.stringify(chunk, null, 2));
-      }
-
-      const choice = chunk.choices?.[0];
-      if (!choice) continue;
-
-      const delta = choice.delta;
-
-      // Вариант A: контент как строка
-      if (typeof (delta as any).content === "string") {
-        const text = (delta as any).content as string;
-        if (text) {
-          full += text;
-          res.write(`data: ${JSON.stringify({ type: "delta", text })}\n\n`);
-        }
-        continue;
-      }
-
-      // Вариант B: контент как массив блоков (мультимодальный формат)
-      const parts = (delta as any).content;
-      if (Array.isArray(parts)) {
-        for (const p of parts) {
-          if (p?.type === "text" && typeof p.text === "string" && p.text.length) {
-            full += p.text;
-            res.write(`data: ${JSON.stringify({ type: "delta", text: p.text })}\n\n`);
-          }
-        }
-      }
-
-      // иногда приходит только role — пропускаем
+    if (!req.file) return res.status(400).json({ error: "No image" });
+    if (!question && !transcript) {
+      return res.status(400).json({ error: "Empty transcript" });
     }
 
-    // Финал: в историю и закрыть SSE
-    push(sessionId, { role: "assistant", content: full });
-    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
-    res.end();
+    const b64 = req.file.buffer.toString("base64");
+    const dataUrl = `data:image/png;base64,${b64}`;
+
+    const content: ChatMsg["content"] = [];
+    if (question) {
+      content.push({ type: "text", text: formatSmartText(question, smart) });
+    }
+    if (transcript) {
+      content.push({ type: "text", text: buildTranscriptBlock(transcript) });
+    }
+    content.push({ type: "image_url", image_url: { url: dataUrl } });
+
+    const user: ChatMsg = {
+      role: "user",
+      content,
+    };
+
+    await streamAskLikeResponse({
+      res,
+      sessionId,
+      user,
+      debugLabel: "/ask_without_query",
+      maxTokens: 500,
+      temperature: 0.2,
+    });
   } catch (e: any) {
     if (!res.headersSent) {
       return res.status(500).json({ error: e?.message ?? "Internal error" });

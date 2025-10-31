@@ -8,6 +8,5 @@
     "skipLibCheck": true,
     "outDir": "dist"
   },
-  "include": ["src"]
+  "include": ["src", "tests"]
 }
-// API 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

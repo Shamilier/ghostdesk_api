@@ -1,0 +1,303 @@
+openapi: 3.1.0
+info:
+  title: Ghost AI API
+  version: 1.0.0
+servers:
+  - url: https://api.ghostai.ru
+paths:
+  /v1/recordings/init:
+    post:
+      summary: Initialize recording upload
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingInitRequest'
+      responses:
+        '200':
+          description: Presigned URL issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingInitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Conflict due to duplicate client_request_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/recordings/complete:
+    post:
+      summary: Mark recording upload as complete
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingCompleteRequest'
+      responses:
+        '200':
+          description: Recording metadata after completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingCompleteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Recording not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Recording is not in uploading state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Recording exceeds allowed size
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '424':
+          description: Object not found in storage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/recordings:
+    get:
+      summary: List recordings for current user
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          description: Page size (default 20)
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Pagination cursor returned by previous call
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/RecordingStatus'
+      responses:
+        '200':
+          description: Paginated list of recordings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/recordings/{id}:
+    get:
+      summary: Fetch recording metadata
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: include_url
+          in: query
+          schema:
+            type: boolean
+          description: If true, returns a short-lived presigned download URL
+      responses:
+        '200':
+          description: Recording metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Recording not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        details:
+          description: Optional validation details
+          nullable: true
+    RecordingStatus:
+      type: string
+      enum: [uploading, uploaded, analyzing, ready, failed]
+    RecordingInitRequest:
+      type: object
+      properties:
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        lang:
+          type: string
+        codec:
+          type: string
+          default: aac
+        bitrate_kbps:
+          type: integer
+        content_type:
+          type: string
+          default: audio/mp4
+        client_request_id:
+          type: string
+      additionalProperties: false
+    RecordingInitResponse:
+      type: object
+      properties:
+        recording_id:
+          type: string
+        s3_key:
+          type: string
+        upload:
+          type: object
+          properties:
+            method:
+              type: string
+              enum: [PUT]
+            url:
+              type: string
+              format: uri
+            headers:
+              type: object
+              additionalProperties:
+                type: string
+            expires_in:
+              type: integer
+            max_bytes:
+              type: integer
+              nullable: true
+    RecordingCompleteRequest:
+      type: object
+      required: [recording_id]
+      properties:
+        recording_id:
+          type: string
+        size_bytes:
+          type: integer
+        checksum_md5:
+          type: string
+    RecordingCompleteResponse:
+      type: object
+      properties:
+        recording_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RecordingStatus'
+        size_bytes:
+          type: integer
+          nullable: true
+        etag:
+          type: string
+          nullable: true
+    RecordingListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              started_at:
+                type: string
+                format: date-time
+                nullable: true
+              ended_at:
+                type: string
+                format: date-time
+                nullable: true
+              status:
+                $ref: '#/components/schemas/RecordingStatus'
+              size_bytes:
+                type: integer
+                nullable: true
+              content_type:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+        next_cursor:
+          type: string
+          nullable: true
+    RecordingResource:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RecordingStatus'
+        size_bytes:
+          type: integer
+          nullable: true
+        etag:
+          type: string
+          nullable: true
+        content_type:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        download_url:
+          type: string
+          format: uri
+          nullable: true
+  responses:
+    BadRequest:
+      description: Invalid request data
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

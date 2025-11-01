@@ -11,7 +11,8 @@ export function buildRecordingKey({
   if (organizationId) {
     segments.push(`org_${organizationId}`);
   }
-  segments.push(`user_${userId}`);
+  const safeUser = userId.replace(/[^A-Za-z0-9._-]/g, "_");
+  segments.push(`user_${safeUser}`);
   segments.push(`rec_${recordingId}`);
   segments.push("audio.m4a");
   return segments.join("/");

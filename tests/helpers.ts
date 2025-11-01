@@ -30,6 +30,11 @@ export function createTestConfig(): AppConfig {
     port: 0,
     databaseUrl: "",
     openAiApiKey: "test",
+    auth: {
+      profileUrl: "https://auth.example.com/oauth/profile",
+      timeoutMs: 3000,
+      cacheTtlMs: 5 * 60 * 1000,
+    },
     s3: {
       endpoint: "https://example.com",
       region: "us-east-1",

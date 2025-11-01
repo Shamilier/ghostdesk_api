@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach, expect } from "vitest";
+import { describe, it, beforeEach, afterEach, expect, vi } from "vitest";
 import request from "supertest";
 import { mockClient } from "aws-sdk-client-mock";
 import {
@@ -18,21 +18,58 @@ describe("recordings API", () => {
   let dbCtx: { db: Database; destroy: () => Promise<void> };
   let app: ReturnType<typeof createTestApp>;
   let s3Client: S3Client;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
     process.env.NODE_ENV = "test";
     s3Mock.reset();
     config = createTestConfig();
+
+    const profileResponse = (body: Record<string, unknown>, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    const extractToken = (headers: HeadersInit | undefined) => {
+      if (!headers) return null;
+      if (headers instanceof Headers) {
+        const value = headers.get("authorization") ?? headers.get("Authorization");
+        return value ? value.replace(/^Bearer\s+/i, "").trim() : null;
+      }
+      const record = headers as Record<string, string>;
+      const value = record["Authorization"] ?? record["authorization"];
+      return value ? value.replace(/^Bearer\s+/i, "").trim() : null;
+    };
+
+    fetchSpy = vi.fn(async (_url: RequestInfo | URL, options?: RequestInit) => {
+      const token = extractToken(options?.headers);
+      switch (token) {
+        case "user_123":
+          return profileResponse({ id: "user_123", email: "user@example.com", plan: "pro" });
+        case "someone_else":
+          return profileResponse({ id: "someone_else" });
+        case "tricky":
+          return profileResponse({ id: "abc/../.." });
+        default:
+          return profileResponse({ error: "unauthorized" }, 401);
+      }
+    });
+
+    vi.stubGlobal("fetch", fetchSpy);
+
     dbCtx = await createTestDatabase();
     s3Client = createS3Client(config.s3);
     app = createTestApp(config, dbCtx.db, s3Client);
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     await dbCtx.destroy();
   });
 
-  async function initRecording(clientRequestId?: string) {
+  async function initRecording(clientRequestId?: string, token = "user_123") {
     const payload: Record<string, unknown> = {
       started_at: "2025-10-31T10:00:00Z",
       ended_at: "2025-10-31T10:10:00Z",
@@ -47,7 +84,7 @@ describe("recordings API", () => {
 
     const response = await request(app)
       .post("/v1/recordings/init")
-      .set("Authorization", "Bearer user_123")
+      .set("Authorization", `Bearer ${token}`)
       .send(payload)
       .expect(200);
 
@@ -92,6 +129,16 @@ describe("recordings API", () => {
 
     expect(list.body.items).toHaveLength(1);
     expect(list.body.items[0].status).toBe("uploaded");
+  });
+
+  it("sanitizes user id in s3 key", async () => {
+    const init = await initRecording(undefined, "tricky");
+
+    const record = await findRecordingById(dbCtx.db, init.recording_id, "abc/../..");
+    const sanitized = "abc/../..".replace(/[^A-Za-z0-9._-]/g, "_");
+    const escaped = sanitized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(record?.s3Key).toMatch(new RegExp(`^user_${escaped}/`));
+    expect(fetchSpy).toHaveBeenCalled();
   });
 
   it("is idempotent for complete", async () => {

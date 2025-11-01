@@ -20,6 +20,9 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(8787),
   DATABASE_URL: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
+  AUTH_PROFILE_URL: z.string().optional(),
+  AUTH_TIMEOUT_MS: z.coerce.number().default(3000),
+  AUTH_CACHE_TTL_MS: z.coerce.number().default(5 * 60 * 1000),
   S3_ENDPOINT: z.string(),
   S3_REGION: z.string(),
   S3_BUCKET: z.string(),
@@ -44,6 +47,11 @@ export function loadConfig() {
 
   const cfg = parsed.data;
 
+  if (!cfg.AUTH_PROFILE_URL) {
+    console.error("[config] AUTH_PROFILE_URL is required");
+    process.exit(1);
+  }
+
   if (!cfg.DATABASE_URL && cfg.NODE_ENV !== "test") {
     throw new Error("DATABASE_URL is required outside of test environment");
   }
@@ -57,6 +65,11 @@ export function loadConfig() {
     port: cfg.PORT,
     databaseUrl: cfg.DATABASE_URL ?? "",
     openAiApiKey: cfg.OPENAI_API_KEY ?? "",
+    auth: {
+      profileUrl: cfg.AUTH_PROFILE_URL,
+      timeoutMs: cfg.AUTH_TIMEOUT_MS,
+      cacheTtlMs: cfg.AUTH_CACHE_TTL_MS,
+    },
     s3: {
       endpoint: cfg.S3_ENDPOINT,
       region: cfg.S3_REGION,

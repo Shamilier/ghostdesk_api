@@ -7,7 +7,9 @@ import type { AppConfig } from "./config";
 import type { Database } from "./db";
 import { logger } from "./lib/logger";
 import { collectMetrics, metricsContentType } from "./lib/metrics";
-import { requireUser } from "./middleware/auth";
+import { ProfileCache } from "./lib/profileCache";
+import { requireUser } from "./middleware/requireUser";
+import { createRateLimiter } from "./middleware/rateLimit";
 import { createRecordingsRouter } from "./modules/recordings/router";
 
 export interface AppDependencies {
@@ -301,7 +303,16 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     }
   });
 
-  app.use("/v1/recordings", requireUser, createRecordingsRouter({ db, config, s3Client }));
+  const profileCache = new ProfileCache();
+  const auth = requireUser({ config, cache: profileCache });
+  const recordingsRateLimit = createRateLimiter({ windowMs: 60_000, limit: 120 });
+
+  app.use(
+    "/v1/recordings",
+    recordingsRateLimit,
+    auth,
+    createRecordingsRouter({ db, config, s3Client })
+  );
 
   app.post("/hint", async (req, res) => {
     if (!client) {

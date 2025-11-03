@@ -1,4 +1,5 @@
 import type { S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { logger } from "./lib/logger";
 import { createPresignedDownloadUrl } from "./lib/s3";
 import type { AppConfig } from "./config";
@@ -113,9 +114,9 @@ export class TranscribeQueue {
       transcript_error: null,
     });
 
+    // мы все равно можем сгенерить presigned url и залогировать его — полезно для отладки
     const expires = this.config.s3.presignExpiresSeconds;
-
-    let downloadUrl: string;
+    let downloadUrl: string | null = null;
     try {
       downloadUrl = await createPresignedDownloadUrl(this.s3Client, {
         bucket: recording.s3Bucket,
@@ -124,68 +125,79 @@ export class TranscribeQueue {
         responseContentType: recording.contentType,
       });
     } catch (error: any) {
-      const message = error?.message ?? "failed to create presigned url";
-      logger.error("[transcribe] presign-failed", {
+      // не фейлим из-за этого — мы сейчас будем качать через s3Client
+      logger.warn("[transcribe] presign-failed-debug-only", {
         recording: recording.id,
         user: recording.userId,
-        error: message,
+        error: error?.message ?? String(error),
       });
+    }
+
+    // 1) качаем объект из S3/idrivee2
+    let s3Object: any;
+    try {
+      logger.info("[transcribe] s3-get", {
+        recording: recording.id,
+        user: recording.userId,
+        bucket: recording.s3Bucket,
+        key: recording.s3Key,
+      });
+
+      s3Object = await this.s3Client.send(
+        new GetObjectCommand({
+          Bucket: recording.s3Bucket,
+          Key: recording.s3Key,
+        })
+      );
+    } catch (error: any) {
       await this.fail(recording, {
-        step: "presign",
-        message,
+        step: "s3-get",
+        message: error?.message ?? "failed to get object from s3",
       });
       return;
     }
 
-    let sanitizedUrl = downloadUrl;
-    try {
-      const url = new URL(downloadUrl);
-      sanitizedUrl = `${url.host}${url.pathname}`;
-    } catch {
-      sanitizedUrl = "<invalid-url>";
-    }
+    // 2) готовим URL для Deepgram c query
+    const dgUrl = new URL(DEEPGRAM_REMOTE_URL);
+    dgUrl.searchParams.set("model", "general");
+    dgUrl.searchParams.set("language", "ru");
+    dgUrl.searchParams.set("utterances", "true");
+    dgUrl.searchParams.set("smart_format", "true");
 
-    const payload = {
-      model: "general",
-      language: "ru",
-      utterances: true,
-      smart_format: true,
-    } as const;
+    const contentType = recording.contentType || "audio/mp4";
 
     logger.info("[transcribe] start", {
       recording: recording.id,
       user: recording.userId,
-      url: sanitizedUrl,
-      model: payload.model,
-      language: payload.language,
+      // покажем и presigned (если был), и то что реально пойдёт
+      url: downloadUrl ? new URL(downloadUrl).host + new URL(downloadUrl).pathname : "<no-presign>",
+      model: "general",
+      language: "ru",
     });
-
-    let response: Response;
 
     logger.info("[transcribe] deepgram-request", {
       recording: recording.id,
       user: recording.userId,
-      url: sanitizedUrl,
-      dg_endpoint: DEEPGRAM_REMOTE_URL,
-      payload,
+      mode: "stream",
+      dg_endpoint: dgUrl.toString(),
+      content_type: contentType,
     });
 
+    // 3) стримим в DG
     const deepgramStartedAt = Date.now();
+    let response: Response;
     try {
-      response = await fetch(DEEPGRAM_REMOTE_URL, {
+      response = await fetch(dgUrl, {
         method: "POST",
         headers: {
           Authorization: `Token ${this.deepgramApiKey}`,
-          "Content-Type": "application/json",
+          "Content-Type": contentType,
         },
-        body: JSON.stringify({
-          url: downloadUrl,
-          ...payload,
-        }),
+        body: s3Object.Body as any, // Node Readable
       });
     } catch (error: any) {
       await this.fail(recording, {
-        step: "deepgram",
+        step: "deepgram-stream",
         message: error?.message ?? "failed to reach deepgram",
       });
       return;
@@ -199,19 +211,19 @@ export class TranscribeQueue {
       rawBody.length > snippetLimit ? `${rawBody.slice(0, snippetLimit)}…` : rawBody;
 
     if (!response.ok) {
-      const truncated = rawBody.length > 1000 ? `${rawBody.slice(0, 1000)}…` : rawBody;
       logger.error("[transcribe] deepgram-response", {
         recording: recording.id,
         user: recording.userId,
         status: response.status,
         duration_ms: deepgramDurationMs,
         body_len: bodyLength,
+        mode: "stream",
         body: rawBody.length > 2000 ? `${rawBody.slice(0, 2000)}…` : rawBody,
       });
       await this.fail(recording, {
-        step: "deepgram",
+        step: "deepgram-stream",
         status: response.status,
-        message: truncated || `HTTP ${response.status}`,
+        message: rawBody || `HTTP ${response.status}`,
       });
       return;
     }
@@ -222,9 +234,11 @@ export class TranscribeQueue {
       status: response.status,
       duration_ms: deepgramDurationMs,
       body_len: bodyLength,
+      mode: "stream",
       body_snippet: bodySnippet,
     });
 
+    // 4) разбираем JSON как раньше
     let parsed: any;
     try {
       parsed = rawBody ? JSON.parse(rawBody) : null;
@@ -238,13 +252,14 @@ export class TranscribeQueue {
 
     const utterances = Array.isArray(parsed?.results?.utterances) ? parsed.results.utterances : [];
     const summary =
-      buildSummary(utterances) ??
-      "Встреча: краткое описание недоступно";
-    const durationSeconds = typeof parsed?.metadata?.duration === "number" ? parsed.metadata.duration : null;
+      buildSummary(utterances) ?? "Встреча: краткое описание недоступно";
+    const durationSeconds =
+      typeof parsed?.metadata?.duration === "number" ? parsed.metadata.duration : null;
     const durationMs = durationSeconds != null ? Math.round(durationSeconds * 1000) : null;
 
     const firstAlternative = parsed?.results?.channels?.[0]?.alternatives?.[0];
-    const transcriptText = typeof firstAlternative?.transcript === "string" ? firstAlternative.transcript.trim() : "";
+    const transcriptText =
+      typeof firstAlternative?.transcript === "string" ? firstAlternative.transcript.trim() : "";
     const wordsList = Array.isArray(firstAlternative?.words) ? firstAlternative.words : [];
 
     if (!transcriptText && wordsList.length === 0) {
@@ -252,7 +267,7 @@ export class TranscribeQueue {
         recording: recording.id,
         user: recording.userId,
         duration: durationSeconds,
-        note: "Deepgram вернул пустой transcript и слова — нужно смотреть исходный файл",
+        note: "Deepgram вернул пустой transcript и слова — проверьте исходный файл / формат",
       });
     }
 

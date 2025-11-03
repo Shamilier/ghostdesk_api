@@ -125,6 +125,11 @@ export class TranscribeQueue {
       });
     } catch (error: any) {
       const message = error?.message ?? "failed to create presigned url";
+      logger.error("[transcribe] presign-failed", {
+        recording: recording.id,
+        user: recording.userId,
+        error: message,
+      });
       await this.fail(recording, {
         step: "presign",
         message,
@@ -149,6 +154,22 @@ export class TranscribeQueue {
     });
 
     let response: Response;
+    const deepgramPayload = {
+      model: this.config.transcription.model,
+      language: this.config.transcription.language,
+      utterances: true,
+      smart_format: true,
+    } as const;
+
+    logger.info("[transcribe] deepgram-request", {
+      recording: recording.id,
+      user: recording.userId,
+      url: sanitizedUrl,
+      dg_endpoint: DEEPGRAM_REMOTE_URL,
+      payload: deepgramPayload,
+    });
+
+    const deepgramStartedAt = Date.now();
     try {
       response = await fetch(DEEPGRAM_REMOTE_URL, {
         method: "POST",
@@ -158,10 +179,7 @@ export class TranscribeQueue {
         },
         body: JSON.stringify({
           url: downloadUrl,
-          language: this.config.transcription.language,
-          model: this.config.transcription.model,
-          smart_format: true,
-          utterances: true,
+          ...deepgramPayload,
         }),
       });
     } catch (error: any) {
@@ -173,8 +191,22 @@ export class TranscribeQueue {
     }
 
     const rawBody = await response.text();
+    const deepgramDurationMs = Date.now() - deepgramStartedAt;
+    const bodyLength = rawBody.length;
+    const snippetLimit = 800;
+    const bodySnippet =
+      rawBody.length > snippetLimit ? `${rawBody.slice(0, snippetLimit)}…` : rawBody;
+
     if (!response.ok) {
       const truncated = rawBody.length > 1000 ? `${rawBody.slice(0, 1000)}…` : rawBody;
+      logger.error("[transcribe] deepgram-response", {
+        recording: recording.id,
+        user: recording.userId,
+        status: response.status,
+        duration_ms: deepgramDurationMs,
+        body_len: bodyLength,
+        body: rawBody.length > 2000 ? `${rawBody.slice(0, 2000)}…` : rawBody,
+      });
       await this.fail(recording, {
         step: "deepgram",
         status: response.status,
@@ -182,6 +214,15 @@ export class TranscribeQueue {
       });
       return;
     }
+
+    logger.info("[transcribe] deepgram-response", {
+      recording: recording.id,
+      user: recording.userId,
+      status: response.status,
+      duration_ms: deepgramDurationMs,
+      body_len: bodyLength,
+      body_snippet: bodySnippet,
+    });
 
     let parsed: any;
     try {
@@ -200,6 +241,19 @@ export class TranscribeQueue {
       "Встреча: краткое описание недоступно";
     const durationSeconds = typeof parsed?.metadata?.duration === "number" ? parsed.metadata.duration : null;
     const durationMs = durationSeconds != null ? Math.round(durationSeconds * 1000) : null;
+
+    const firstAlternative = parsed?.results?.channels?.[0]?.alternatives?.[0];
+    const transcriptText = typeof firstAlternative?.transcript === "string" ? firstAlternative.transcript.trim() : "";
+    const wordsList = Array.isArray(firstAlternative?.words) ? firstAlternative.words : [];
+
+    if (!transcriptText && wordsList.length === 0) {
+      logger.warn("[transcribe] empty-result", {
+        recording: recording.id,
+        user: recording.userId,
+        duration: durationSeconds,
+        note: "Deepgram вернул пустой transcript и слова — нужно смотреть исходный файл",
+      });
+    }
 
     logger.info("[transcribe] deepgram-ok", {
       recording: recording.id,

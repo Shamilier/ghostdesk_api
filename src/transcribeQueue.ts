@@ -145,28 +145,29 @@ export class TranscribeQueue {
       sanitizedUrl = "<invalid-url>";
     }
 
+    const payload = {
+      model: "general",
+      language: "ru",
+      utterances: true,
+      smart_format: true,
+    } as const;
+
     logger.info("[transcribe] start", {
       recording: recording.id,
       user: recording.userId,
       url: sanitizedUrl,
-      model: this.config.transcription.model,
-      language: this.config.transcription.language,
+      model: payload.model,
+      language: payload.language,
     });
 
     let response: Response;
-    const deepgramPayload = {
-      model: this.config.transcription.model,
-      language: this.config.transcription.language,
-      utterances: true,
-      smart_format: true,
-    } as const;
 
     logger.info("[transcribe] deepgram-request", {
       recording: recording.id,
       user: recording.userId,
       url: sanitizedUrl,
       dg_endpoint: DEEPGRAM_REMOTE_URL,
-      payload: deepgramPayload,
+      payload,
     });
 
     const deepgramStartedAt = Date.now();
@@ -179,7 +180,7 @@ export class TranscribeQueue {
         },
         body: JSON.stringify({
           url: downloadUrl,
-          ...deepgramPayload,
+          ...payload,
         }),
       });
     } catch (error: any) {

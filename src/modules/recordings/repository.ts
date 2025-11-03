@@ -168,5 +168,10 @@ function mapRow(row: any): Recording {
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
     clientRequestId: row.client_request_id ?? null,
+    transcriptStatus: row.transcript_status ?? "none",
+    transcriptSummary: row.transcript_summary ?? null,
+    transcriptJson: row.transcript_json ?? null,
+    transcriptError: row.transcript_error ?? null,
+    transcribedAt: row.transcribed_at ? new Date(row.transcribed_at) : null,
   };
 }

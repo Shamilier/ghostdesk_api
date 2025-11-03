@@ -9,6 +9,8 @@ export type RecordingStatus =
   | "ready"
   | "failed";
 
+export type TranscriptStatus = "none" | "queued" | "processing" | "ready" | "failed";
+
 export interface RecordingsTable {
   id: string;
   user_id: string;
@@ -27,6 +29,11 @@ export interface RecordingsTable {
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
   client_request_id: string | null;
+  transcript_status: TranscriptStatus;
+  transcript_summary: string | null;
+  transcript_json: string | null;
+  transcript_error: string | null;
+  transcribed_at: Date | null;
 }
 
 export interface DatabaseSchema {

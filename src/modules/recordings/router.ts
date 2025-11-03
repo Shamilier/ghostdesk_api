@@ -24,6 +24,7 @@ import {
   recordingsInitCounter,
 } from "../../lib/metrics";
 import type { Recording } from "./types";
+import { TranscribeQueue } from "../../transcribeQueue";
 
 const INIT_SCHEMA = z.object({
   started_at: z.string().datetime().optional(),
@@ -63,6 +64,7 @@ export interface RecordingsRouterDeps {
   db: Database;
   config: AppConfig;
   s3Client: S3Client;
+  transcribeQueue: TranscribeQueue;
 }
 
 function parseMaybeDate(value?: string) {
@@ -95,7 +97,7 @@ function decodeCursor(cursor: string) {
   }
 }
 
-export function createRecordingsRouter({ db, config, s3Client }: RecordingsRouterDeps) {
+export function createRecordingsRouter({ db, config, s3Client, transcribeQueue }: RecordingsRouterDeps) {
   const router = Router();
 
   router.post("/init", async (req, res) => {
@@ -275,6 +277,49 @@ export function createRecordingsRouter({ db, config, s3Client }: RecordingsRoute
         s3_request_id: head.requestId,
       });
 
+      if (transcribeQueue.isEnabled()) {
+        try {
+          if (updated.transcriptStatus === "none") {
+            await db
+              .updateTable("recordings")
+              .set({
+                transcript_status: "queued",
+                transcript_error: null,
+                updated_at: new Date(),
+              })
+              .where("id", "=", updated.id)
+              .where("user_id", "=", req.user.id)
+              .where("transcript_status", "=", "none")
+              .executeTakeFirst();
+
+            const refreshed = await findRecordingById(db, updated.id, req.user.id);
+            if (refreshed && refreshed.transcriptStatus === "queued") {
+              transcribeQueue.enqueue(refreshed);
+              logger.info("[transcribe] queued", {
+                recording: refreshed.id,
+                user: refreshed.userId,
+                s3_key: refreshed.s3Key,
+                size: effectiveSize,
+              });
+            }
+          }
+        } catch (queueError: any) {
+          logger.error("[transcribe][error]", {
+            recording: updated.id,
+            user: req.user.id,
+            step: "queue",
+            msg: queueError?.message ?? "failed to enqueue transcription",
+          });
+        }
+      } else {
+        logger.info("[transcribe] skipped_missing_api_key", {
+          recording: updated.id,
+          user: req.user.id,
+          s3_key: updated.s3Key,
+          size: effectiveSize,
+        });
+      }
+
       return res.json({
         recording_id: updated.id,
         status: updated.status,
@@ -328,6 +373,8 @@ export function createRecordingsRouter({ db, config, s3Client }: RecordingsRoute
         size_bytes: recording.sizeBytes,
         content_type: recording.contentType,
         created_at: recording.createdAt.toISOString(),
+        transcript_status: recording.transcriptStatus,
+        transcript_summary: recording.transcriptSummary,
       }));
 
       const last = recordings.length === limit ? recordings[recordings.length - 1] : null;
@@ -369,6 +416,8 @@ export function createRecordingsRouter({ db, config, s3Client }: RecordingsRoute
         content_type: recording.contentType,
         created_at: recording.createdAt.toISOString(),
         updated_at: recording.updatedAt.toISOString(),
+        transcript_status: recording.transcriptStatus,
+        transcript_summary: recording.transcriptSummary,
       };
 
       if (includeUrl) {
@@ -388,6 +437,71 @@ export function createRecordingsRouter({ db, config, s3Client }: RecordingsRoute
         message: error?.message,
       });
       return res.status(500).json({ error: "Failed to load recording" });
+    }
+  });
+
+  router.get("/:id/transcript", async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    try {
+      const recording = await findRecordingById(db, req.params.id, req.user.id);
+      if (!recording) {
+        return res.status(404).json({ error: "Recording not found" });
+      }
+
+      const status = recording.transcriptStatus;
+
+      logger.info("[transcribe] fetch", {
+        recording: recording.id,
+        user: req.user.id,
+        status,
+      });
+
+      if (status === "ready") {
+        let transcript: any = null;
+        if (recording.transcriptJson) {
+          try {
+            transcript = JSON.parse(recording.transcriptJson);
+          } catch (error: any) {
+            logger.error("[transcribe][error]", {
+              recording: recording.id,
+              user: req.user.id,
+              step: "read-json",
+              msg: error?.message ?? "failed to parse stored transcript",
+            });
+            return res.json({ status: "failed", error: "Stored transcript is corrupted" });
+          }
+        }
+
+        return res.json({
+          status: "ready",
+          summary: recording.transcriptSummary,
+          transcript,
+        });
+      }
+
+      if (status === "failed") {
+        return res.json({
+          status: "failed",
+          error: recording.transcriptError ?? "Transcription failed",
+        });
+      }
+
+      if (status === "queued" || status === "processing") {
+        return res.json({ status: "processing" });
+      }
+
+      return res.json({ status: "none" });
+    } catch (error: any) {
+      logger.error("[transcribe][error]", {
+        recording: req.params.id,
+        user: req.user?.id,
+        step: "fetch",
+        msg: error?.message,
+      });
+      return res.status(500).json({ error: "Failed to load transcript" });
     }
   });
 

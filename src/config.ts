@@ -20,6 +20,10 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(8787),
   DATABASE_URL: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
+  DEEPGRAM_API_KEY: z.string().optional(),
+  DEEPGRAM_MODEL: z.string().default("general"),
+  DEEPGRAM_LANGUAGE: z.string().default("ru"),
+  TRANSCRIBE_MAX_CONCURRENCY: z.coerce.number().int().min(1).default(3),
   AUTH_PROFILE_URL: z.string().optional(),
   AUTH_TIMEOUT_MS: z.coerce.number().default(3000),
   AUTH_CACHE_TTL_MS: z.coerce.number().default(5 * 60 * 1000),
@@ -60,6 +64,10 @@ export function loadConfig() {
     console.warn("[config] OPENAI_API_KEY is not set; OpenAI features may not work");
   }
 
+  if (!cfg.DEEPGRAM_API_KEY) {
+    console.warn("[config] DEEPGRAM_API_KEY is not set; transcription queue will be disabled");
+  }
+
   return {
     nodeEnv: cfg.NODE_ENV,
     port: cfg.PORT,
@@ -81,6 +89,12 @@ export function loadConfig() {
     },
     recordings: {
       maxBytes: cfg.RECORDINGS_MAX_BYTES ?? null,
+    },
+    transcription: {
+      deepgramApiKey: cfg.DEEPGRAM_API_KEY ?? "",
+      model: cfg.DEEPGRAM_MODEL,
+      language: cfg.DEEPGRAM_LANGUAGE,
+      maxConcurrency: cfg.TRANSCRIBE_MAX_CONCURRENCY,
     },
     publicAppOrigin: cfg.PUBLIC_APP_ORIGIN,
   } as const;

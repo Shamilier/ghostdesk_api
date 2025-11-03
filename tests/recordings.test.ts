@@ -129,6 +129,23 @@ describe("recordings API", () => {
 
     expect(list.body.items).toHaveLength(1);
     expect(list.body.items[0].status).toBe("uploaded");
+    expect(list.body.items[0].transcript_status).toBe("none");
+    expect(list.body.items[0].transcript_summary).toBeNull();
+
+    const details = await request(app)
+      .get(`/v1/recordings/${init.recording_id}`)
+      .set("Authorization", "Bearer user_123")
+      .expect(200);
+
+    expect(details.body.transcript_status).toBe("none");
+    expect(details.body.transcript_summary).toBeNull();
+
+    const transcript = await request(app)
+      .get(`/v1/recordings/${init.recording_id}/transcript`)
+      .set("Authorization", "Bearer user_123")
+      .expect(200);
+
+    expect(transcript.body).toEqual({ status: "none" });
   });
 
   it("sanitizes user id in s3 key", async () => {

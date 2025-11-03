@@ -5,6 +5,7 @@ import type { AppConfig } from "../src/config";
 import { createApp } from "../src/app";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { up as migrateRecordings } from "../src/migrations/001_create_recordings";
+import { up as migrateTranscriptFields } from "../src/migrations/002_add_transcript_fields";
 
 export async function createTestDatabase(): Promise<{ db: Database; destroy: () => Promise<void> }> {
   const mem = newDb({ autoCreateForeignKeyIndices: true });
@@ -14,6 +15,7 @@ export async function createTestDatabase(): Promise<{ db: Database; destroy: () 
   const db = new Kysely<DatabaseSchema>({ dialect });
 
   await migrateRecordings(db);
+  await migrateTranscriptFields(db);
 
   return {
     db,
@@ -46,6 +48,12 @@ export function createTestConfig(): AppConfig {
     },
     recordings: {
       maxBytes: 209715200,
+    },
+    transcription: {
+      deepgramApiKey: "",
+      model: "general",
+      language: "ru",
+      maxConcurrency: 3,
     },
     publicAppOrigin: "http://localhost:3000",
   } as const;

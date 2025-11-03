@@ -11,6 +11,7 @@ import { ProfileCache } from "./lib/profileCache";
 import { requireUser } from "./middleware/requireUser";
 import { createRateLimiter } from "./middleware/rateLimit";
 import { createRecordingsRouter } from "./modules/recordings/router";
+import { TranscribeQueue } from "./transcribeQueue";
 
 export interface AppDependencies {
   config: AppConfig;
@@ -306,12 +307,23 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
   const profileCache = new ProfileCache();
   const auth = requireUser({ config, cache: profileCache });
   const recordingsRateLimit = createRateLimiter({ windowMs: 60_000, limit: 120 });
+  const transcribeQueue = new TranscribeQueue({ config, db, s3Client });
+
+  if (transcribeQueue.isEnabled()) {
+    logger.info("[transcribe] enabled", {
+      model: config.transcription.model,
+      language: config.transcription.language,
+      max_concurrency: config.transcription.maxConcurrency,
+    });
+  } else {
+    logger.info("[transcribe] disabled", { reason: "missing_api_key" });
+  }
 
   app.use(
     "/v1/recordings",
     recordingsRateLimit,
     auth,
-    createRecordingsRouter({ db, config, s3Client })
+    createRecordingsRouter({ db, config, s3Client, transcribeQueue })
   );
 
   app.post("/hint", async (req, res) => {

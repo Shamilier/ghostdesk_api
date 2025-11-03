@@ -166,14 +166,13 @@ export class TranscribeQueue {
 
     const contentType = recording.contentType || "audio/mp4";
 
-    logger.info("[transcribe] start", {
-      recording: recording.id,
-      user: recording.userId,
-      // покажем и presigned (если был), и то что реально пойдёт
-      url: downloadUrl ? new URL(downloadUrl).host + new URL(downloadUrl).pathname : "<no-presign>",
-      model: "general",
-      language: "ru",
-    });
+    logger.info("[transcribe] deepgram-request", {
+  recording: recording.id,
+  user: recording.userId,
+  mode: "stream",
+  dg_endpoint: dgUrl.toString(),
+  content_type: contentType,
+});
 
     logger.info("[transcribe] deepgram-request", {
       recording: recording.id,
@@ -186,22 +185,24 @@ export class TranscribeQueue {
     // 3) стримим в DG
     const deepgramStartedAt = Date.now();
     let response: Response;
-    try {
-      response = await fetch(dgUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Token ${this.deepgramApiKey}`,
-          "Content-Type": contentType,
-        },
-        body: s3Object.Body as any, // Node Readable
-      });
-    } catch (error: any) {
-      await this.fail(recording, {
-        step: "deepgram-stream",
-        message: error?.message ?? "failed to reach deepgram",
-      });
-      return;
-    }
+try {
+  response = await fetch(dgUrl, {
+    method: "POST",
+    // вот ЭТО главное:
+    duplex: "half",
+    headers: {
+      Authorization: `Token ${this.deepgramApiKey}`,
+      "Content-Type": contentType,
+    },
+    body: s3Object.Body as any,
+  });
+} catch (error: any) {
+  await this.fail(recording, {
+    step: "deepgram-stream",
+    message: error?.message ?? "failed to reach deepgram",
+  });
+  return;
+}
 
     const rawBody = await response.text();
     const deepgramDurationMs = Date.now() - deepgramStartedAt;

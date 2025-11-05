@@ -21,7 +21,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   DEEPGRAM_API_KEY: z.string().optional(),
-  DEEPGRAM_MODEL: z.string().default("general"),
+  DEEPGRAM_MODEL: z.string().default("nova-2"),
   DEEPGRAM_LANGUAGE: z.string().default("ru"),
   TRANSCRIBE_MAX_CONCURRENCY: z.coerce.number().int().min(1).default(3),
   AUTH_PROFILE_URL: z.string().optional(),

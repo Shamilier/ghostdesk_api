@@ -173,5 +173,6 @@ function mapRow(row: any): Recording {
     transcriptJson: row.transcript_json ?? null,
     transcriptError: row.transcript_error ?? null,
     transcribedAt: row.transcribed_at ? new Date(row.transcribed_at) : null,
+    actionItemsJson: row.action_items_json ?? null,
   };
 }

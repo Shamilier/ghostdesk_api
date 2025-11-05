@@ -34,10 +34,23 @@ export interface RecordingsTable {
   transcript_json: string | null;
   transcript_error: string | null;
   transcribed_at: Date | null;
+  action_items_json: unknown;
+}
+
+export interface RecordingChunksTable {
+  id: Generated<number>;
+  recording_id: string;
+  chunk_index: number;
+  start_sec: number;
+  end_sec: number;
+  text: string;
+  embedding: unknown;
+  tsv: string | null;
 }
 
 export interface DatabaseSchema {
   recordings: RecordingsTable;
+  recording_chunks: RecordingChunksTable;
 }
 
 export type Database = Kysely<DatabaseSchema>;

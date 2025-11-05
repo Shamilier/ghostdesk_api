@@ -14,6 +14,8 @@ Copy `.env.example` and adjust the values:
 
 - `DATABASE_URL` – PostgreSQL connection string.
 - `OPENAI_API_KEY` – API key used by the assistant endpoints.
+- `EMBEDDINGS_ENABLED`, `EMBEDDINGS_MODEL`, `EMBEDDINGS_BATCH_SIZE`, `EMBEDDINGS_MAX_RETRIES` – toggle and tune the transcript
+  embedding ingest pipeline (defaults: disabled / `text-embedding-3-small` / 128 / 5).
 - `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_LANGUAGE`, `TRANSCRIBE_MAX_CONCURRENCY` – configuration for the asynchronous
   transcription worker. If the API key is omitted, transcriptions are skipped.
 - `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` – storage configuration.

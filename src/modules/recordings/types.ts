@@ -23,6 +23,7 @@ export interface Recording {
   transcriptJson: string | null;
   transcriptError: string | null;
   transcribedAt: Date | null;
+  actionItemsJson: unknown;
 }
 
 export interface RecordingListItem {

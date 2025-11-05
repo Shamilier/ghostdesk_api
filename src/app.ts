@@ -11,6 +11,8 @@ import { ProfileCache } from "./lib/profileCache";
 import { requireUser } from "./middleware/requireUser";
 import { createRateLimiter } from "./middleware/rateLimit";
 import { createRecordingsRouter } from "./modules/recordings/router";
+import { EmbeddingIngestQueue } from "./modules/embeddings/ingestQueue";
+import { createQaRouter } from "./modules/qa/router";
 import { TranscribeQueue } from "./transcribeQueue";
 
 export interface AppDependencies {
@@ -307,7 +309,22 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
   const profileCache = new ProfileCache();
   const auth = requireUser({ config, cache: profileCache });
   const recordingsRateLimit = createRateLimiter({ windowMs: 60_000, limit: 120 });
-  const transcribeQueue = new TranscribeQueue({ config, db, s3Client });
+  const qaRateLimit = createRateLimiter({ windowMs: 60_000, limit: 60 });
+
+  const embeddingQueue = new EmbeddingIngestQueue({
+    config,
+    db,
+    openAiApiKey: config.openAiApiKey,
+  });
+
+  if (embeddingQueue.isEnabled()) {
+    logger.info("[embeddings] enabled", {
+      model: config.embeddings.model,
+      batch_size: config.embeddings.batchSize,
+    });
+  }
+
+  const transcribeQueue = new TranscribeQueue({ config, db, s3Client, embeddingQueue });
 
   if (transcribeQueue.isEnabled()) {
     logger.info("[transcribe] enabled", {
@@ -325,6 +342,8 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     auth,
     createRecordingsRouter({ db, config, s3Client, transcribeQueue })
   );
+
+  app.use("/v1/ask", qaRateLimit, auth, createQaRouter({ db, config, openAiClient: client }));
 
   app.post("/hint", async (req, res) => {
     if (!client) {

@@ -6,6 +6,7 @@ import { createApp } from "../src/app";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { up as migrateRecordings } from "../src/migrations/001_create_recordings";
 import { up as migrateTranscriptFields } from "../src/migrations/002_add_transcript_fields";
+import { up as migrateRecordingChunks } from "../src/migrations/003_create_recording_chunks";
 
 export async function createTestDatabase(): Promise<{ db: Database; destroy: () => Promise<void> }> {
   const mem = newDb({ autoCreateForeignKeyIndices: true });
@@ -16,6 +17,7 @@ export async function createTestDatabase(): Promise<{ db: Database; destroy: () 
 
   await migrateRecordings(db);
   await migrateTranscriptFields(db);
+  await migrateRecordingChunks(db);
 
   return {
     db,
@@ -48,6 +50,12 @@ export function createTestConfig(): AppConfig {
     },
     recordings: {
       maxBytes: 209715200,
+    },
+    embeddings: {
+      enabled: false,
+      model: "text-embedding-3-small",
+      batchSize: 64,
+      maxRetries: 3,
     },
     transcription: {
       deepgramApiKey: "",

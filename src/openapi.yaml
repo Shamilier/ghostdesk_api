@@ -145,6 +145,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /v1/ask:
+    post:
+      summary: Ask a question about a recording
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AskRequest'
+      responses:
+        '200':
+          description: Answer generated from indexed transcript
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AskResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Recording not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Embeddings pipeline unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   securitySchemes:
     bearerAuth:
@@ -159,6 +193,38 @@ components:
         details:
           description: Optional validation details
           nullable: true
+    AskRequest:
+      type: object
+      required:
+        - recording_id
+        - question
+      properties:
+        recording_id:
+          type: string
+          description: Recording identifier
+        question:
+          type: string
+          description: Natural language question
+    AskResponse:
+      type: object
+      properties:
+        answer:
+          type: string
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/AskSource'
+    AskSource:
+      type: object
+      properties:
+        chunk_id:
+          type: integer
+        start_sec:
+          type: number
+          format: float
+        end_sec:
+          type: number
+          format: float
     RecordingStatus:
       type: string
       enum: [uploading, uploaded, analyzing, ready, failed]

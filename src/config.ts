@@ -36,6 +36,10 @@ const envSchema = z.object({
   S3_FORCE_PATH_STYLE: booleanFromEnv.default(false),
   RECORDINGS_MAX_BYTES: z.coerce.number().optional(),
   PUBLIC_APP_ORIGIN: z.string(),
+  EMBEDDINGS_ENABLED: booleanFromEnv.default(false),
+  EMBEDDINGS_MODEL: z.string().default("text-embedding-3-small"),
+  EMBEDDINGS_BATCH_SIZE: z.coerce.number().int().positive().default(128),
+  EMBEDDINGS_MAX_RETRIES: z.coerce.number().int().positive().default(5),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -89,6 +93,12 @@ export function loadConfig() {
     },
     recordings: {
       maxBytes: cfg.RECORDINGS_MAX_BYTES ?? null,
+    },
+    embeddings: {
+      enabled: Boolean(cfg.EMBEDDINGS_ENABLED),
+      model: cfg.EMBEDDINGS_MODEL,
+      batchSize: cfg.EMBEDDINGS_BATCH_SIZE,
+      maxRetries: cfg.EMBEDDINGS_MAX_RETRIES,
     },
     transcription: {
       deepgramApiKey: cfg.DEEPGRAM_API_KEY ?? "",

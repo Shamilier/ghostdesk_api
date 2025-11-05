@@ -5,11 +5,13 @@ import { createPresignedDownloadUrl } from "./lib/s3";
 import type { AppConfig } from "./config";
 import type { Database, TranscriptStatus } from "./db";
 import type { Recording } from "./modules/recordings/types";
+import type { EmbeddingIngestQueue } from "./modules/embeddings/ingestQueue";
 
 interface TranscribeQueueDeps {
   config: AppConfig;
   db: Database;
   s3Client: S3Client;
+  embeddingQueue?: EmbeddingIngestQueue;
 }
 
 interface TranscriptPatch {
@@ -52,16 +54,18 @@ export class TranscribeQueue {
   private readonly enabled: boolean;
   private readonly maxConcurrency: number;
   private readonly deepgramApiKey: string;
+  private readonly embeddingQueue?: EmbeddingIngestQueue;
   private queue: Recording[] = [];
   private active = 0;
 
-  constructor({ config, db, s3Client }: TranscribeQueueDeps) {
+  constructor({ config, db, s3Client, embeddingQueue }: TranscribeQueueDeps) {
     this.db = db;
     this.config = config;
     this.s3Client = s3Client;
     this.deepgramApiKey = config.transcription.deepgramApiKey;
     this.enabled = Boolean(this.deepgramApiKey);
     this.maxConcurrency = Math.max(1, config.transcription.maxConcurrency);
+    this.embeddingQueue = embeddingQueue;
   }
 
   isEnabled(): boolean {
@@ -286,6 +290,16 @@ try {
       transcript_error: null,
       transcribed_at: new Date(),
     });
+
+    try {
+      this.embeddingQueue?.enqueue(recording.id);
+    } catch (error: any) {
+      logger.error("[transcribe] embedding_enqueue_failed", {
+        recording: recording.id,
+        user: recording.userId,
+        msg: error?.message ?? String(error),
+      });
+    }
 
     const words = countWords(utterances);
     logger.info("[transcribe] done", {

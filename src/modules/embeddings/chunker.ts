@@ -7,7 +7,21 @@ export interface TranscriptChunk {
 }
 
 interface SplitOptions {
-  targetTokens: number;
+  /**
+   * Desired minimum token count per chunk before we consider flushing. Defaults to 400.
+   */
+  minTokens: number;
+  /**
+   * Hard upper bound for tokens in a chunk. Defaults to 600.
+   */
+  maxTokens: number;
+  /**
+   * Maximum duration (in seconds) of a chunk. Defaults to 60 seconds.
+   */
+  maxDurationSec: number;
+  /**
+   * Percentage of tokens to keep between neighbouring chunks. Defaults to 0.18 (18%).
+   */
   overlapRatio: number;
   maxChunks?: number;
 }
@@ -116,8 +130,13 @@ export function splitTranscript(
     }));
 
   const chunks: TranscriptChunk[] = [];
-  const targetTokens = Math.max(100, Math.round(options.targetTokens));
-  const overlapTokens = Math.max(0, Math.round(targetTokens * Math.max(0, Math.min(1, options.overlapRatio))));
+  const minTokens = Math.max(50, Math.round(options.minTokens));
+  const maxTokens = Math.max(minTokens, Math.round(options.maxTokens));
+  const maxDurationSec = Math.max(10, Number.isFinite(options.maxDurationSec) ? Number(options.maxDurationSec) : 60);
+  const overlapTokens = Math.max(
+    0,
+    Math.round(maxTokens * Math.max(0, Math.min(1, options.overlapRatio)))
+  );
   const maxChunks = options.maxChunks ?? DEFAULT_MAX_CHUNKS;
 
   if (!utterances.length) {
@@ -176,30 +195,46 @@ export function splitTranscript(
       break;
     }
 
+    if (buffer.length) {
+      const durationWithNext = Math.max(0, utterance.end - buffer[0].start);
+      const wouldExceedTokens = bufferTokens + utterance.tokenEstimate > maxTokens;
+      const wouldExceedDuration = durationWithNext > maxDurationSec;
+      const flushForDuration = wouldExceedDuration && bufferTokens > 0;
+      const flushForTokens = wouldExceedTokens && bufferTokens >= minTokens;
+      if (flushForDuration || flushForTokens) {
+        const durationOnly = flushForDuration && !flushForTokens;
+        flush();
+        if (chunks.length >= maxChunks) {
+          break;
+        }
+        if (durationOnly && buffer.length <= 1) {
+          buffer = [];
+          bufferTokens = 0;
+        } else {
+          carryOverlap();
+        }
+      }
+    }
+
     if (!buffer.length) {
       buffer.push(utterance);
       bufferTokens = utterance.tokenEstimate;
       continue;
     }
 
-    if (bufferTokens + utterance.tokenEstimate <= targetTokens || !buffer.length) {
-      buffer.push(utterance);
-      bufferTokens += utterance.tokenEstimate;
-      continue;
-    }
-
-    flush();
-    if (chunks.length >= maxChunks) {
-      break;
-    }
-    carryOverlap();
-    if (bufferTokens + utterance.tokenEstimate > targetTokens && buffer.length) {
-      // if single utterance is larger than target, force flush
-      flush();
-      carryOverlap();
-    }
     buffer.push(utterance);
     bufferTokens += utterance.tokenEstimate;
+
+    const duration = Math.max(0, buffer[buffer.length - 1].end - buffer[0].start);
+    const shouldForceFlush = bufferTokens >= maxTokens || duration >= maxDurationSec;
+    const singleOversized = buffer.length === 1 && shouldForceFlush;
+    if ((shouldForceFlush && bufferTokens >= minTokens) || singleOversized) {
+      flush();
+      if (chunks.length >= maxChunks) {
+        break;
+      }
+      carryOverlap();
+    }
   }
 
   if (chunks.length < maxChunks && buffer.length) {

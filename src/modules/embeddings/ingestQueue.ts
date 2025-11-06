@@ -38,8 +38,10 @@ function withPrefix(text: string): string {
   return `passage: ${trimmed}`;
 }
 
-const DEFAULT_TARGET_TOKENS = 720;
-const DEFAULT_OVERLAP_RATIO = 0.15;
+const DEFAULT_MIN_TOKENS = 400;
+const DEFAULT_MAX_TOKENS = 600;
+const DEFAULT_MAX_DURATION_SEC = 60;
+const DEFAULT_OVERLAP_RATIO = 0.18;
 const MAX_TASK_RETRIES = 5;
 
 export class EmbeddingIngestQueue {
@@ -206,7 +208,9 @@ export class EmbeddingIngestQueue {
     }
 
     const chunks = splitTranscript(recording.transcript_json, {
-      targetTokens: DEFAULT_TARGET_TOKENS,
+      minTokens: DEFAULT_MIN_TOKENS,
+      maxTokens: DEFAULT_MAX_TOKENS,
+      maxDurationSec: DEFAULT_MAX_DURATION_SEC,
       overlapRatio: DEFAULT_OVERLAP_RATIO,
     });
 
@@ -289,33 +293,25 @@ export class EmbeddingIngestQueue {
             chunk.startSec
           )}, ${formatSeconds(chunk.endSec)}, ${chunk.text}, ${JSON.stringify(
             embedding
-          )}::jsonb)`;
+          )}::jsonb, ${tsvAsText
+            ? sql`to_tsvector('russian', ${chunk.text})::text`
+            : sql`to_tsvector('russian', ${chunk.text})`})`;
         }
         const literal = toVectorLiteral(embedding);
         return sql`(${recordingId}, ${chunk.index}, ${formatSeconds(
           chunk.startSec
-        )}, ${formatSeconds(chunk.endSec)}, ${chunk.text}, ${sql.raw(`${literal}::vector(1536)`)})`;
+        )}, ${formatSeconds(chunk.endSec)}, ${chunk.text}, ${sql.raw(`${literal}::vector(1536)`)}, ${
+          tsvAsText
+            ? sql`to_tsvector('russian', ${chunk.text})::text`
+            : sql`to_tsvector('russian', ${chunk.text})`
+        })`;
       });
 
       const insertQuery = sql`
-        INSERT INTO recording_chunks (recording_id, chunk_index, start_sec, end_sec, text, embedding)
+        INSERT INTO recording_chunks (recording_id, chunk_index, start_sec, end_sec, text, embedding, tsv)
         VALUES ${sql.join(values, sql`, `)}
       `;
       await insertQuery.execute(trx);
-
-      if (tsvAsText) {
-        await sql`
-          UPDATE recording_chunks
-            SET tsv = to_tsvector('russian', coalesce(text, ''))::text
-          WHERE recording_id = ${recordingId}
-        `.execute(trx);
-      } else {
-        await sql`
-          UPDATE recording_chunks
-            SET tsv = to_tsvector('russian', coalesce(text, ''))
-          WHERE recording_id = ${recordingId}
-        `.execute(trx);
-      }
     });
   }
 

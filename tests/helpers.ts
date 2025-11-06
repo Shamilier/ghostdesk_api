@@ -57,6 +57,17 @@ export function createTestConfig(): AppConfig {
       batchSize: 64,
       maxRetries: 3,
     },
+    qa: {
+      retrieval: {
+        minCombinedScore: 0.35,
+        minSupport: 2,
+        topKVector: 8,
+        topKBm25: 8,
+      },
+      response: {
+        maxChunks: 5,
+      },
+    },
     transcription: {
       deepgramApiKey: "",
       model: "general",

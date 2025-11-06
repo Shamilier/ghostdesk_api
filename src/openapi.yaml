@@ -214,6 +214,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AskSource'
+        speculative:
+          type: boolean
+          description: Indicates whether the answer is a speculative guess without transcript support.
     AskSource:
       type: object
       properties:

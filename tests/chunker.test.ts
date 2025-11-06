@@ -27,7 +27,12 @@ describe("splitTranscript", () => {
       }))
     );
 
-    const chunks = splitTranscript(transcript, { targetTokens: 50, overlapRatio: 0.2 });
+    const chunks = splitTranscript(transcript, {
+      minTokens: 100,
+      maxTokens: 140,
+      maxDurationSec: 45,
+      overlapRatio: 0.2,
+    });
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
       expect(chunk.text.length).toBeGreaterThan(0);
@@ -50,10 +55,31 @@ describe("splitTranscript", () => {
       },
     });
 
-    const chunks = splitTranscript(transcript, { targetTokens: 100, overlapRatio: 0.1 });
+    const chunks = splitTranscript(transcript, {
+      minTokens: 80,
+      maxTokens: 120,
+      maxDurationSec: 60,
+      overlapRatio: 0.15,
+    });
     expect(chunks).toHaveLength(1);
     expect(chunks[0]?.text).toContain("общее описание");
     expect(chunks[0]?.startSec).toBe(0);
     expect(chunks[0]?.endSec).toBe(0);
+  });
+  it("splits when duration exceeds the cap even if tokens are low", () => {
+    const transcript = buildTranscript([
+      { start: 0, end: 50, text: "Первая реплика длинная по времени", speaker: "A" },
+      { start: 55, end: 115, text: "Вторая реплика тоже длинная", speaker: "B" },
+    ]);
+
+    const chunks = splitTranscript(transcript, {
+      minTokens: 30,
+      maxTokens: 400,
+      maxDurationSec: 60,
+      overlapRatio: 0.2,
+    });
+
+    expect(chunks.length).toBe(2);
+    expect(chunks[0]?.endSec - chunks[0]?.startSec).toBeLessThanOrEqual(60);
   });
 });

@@ -38,35 +38,28 @@ interface RankedChunk {
   score: number;
 }
 
+interface SupportEvaluation {
+  maxScore: number;
+  supportCount: number;
+  ok: boolean;
+}
+
 type EmbeddingStorage = "vector" | "json";
 type TsvStorage = "tsvector" | "text";
+
+const SUMMARY_REGEX = /(о ч(?:е|ё)м|итог|резюме|summary|overall)/i;
+const ACTION_REGEX = /(задач|договорен|следующ(?:ие|\sшаги)|todo|next steps?)/i;
 
 function normalizeQuestion(question: string): string {
   return question.toLowerCase();
 }
 
 function isSummaryQuestion(question: string): boolean {
-  const normalized = normalizeQuestion(question);
-  return (
-    normalized.includes("о чём была встреча") ||
-    normalized.includes("о чем была встреча") ||
-    normalized.includes("о чем была встреча") ||
-    normalized.includes("о чем говорили") ||
-    normalized.includes("о чём говорили") ||
-    normalized.includes("краткое содержание")
-  );
+  return SUMMARY_REGEX.test(normalizeQuestion(question));
 }
 
 function isActionItemsQuestion(question: string): boolean {
-  const normalized = normalizeQuestion(question);
-  return (
-    normalized.includes("задач") ||
-    normalized.includes("договор") ||
-    normalized.includes("action items") ||
-    normalized.includes("next step") ||
-    normalized.includes("что нужно сделать") ||
-    normalized.includes("какие задачи")
-  );
+  return ACTION_REGEX.test(normalizeQuestion(question));
 }
 
 function sanitizeEmbedding(values: number[]): number[] {
@@ -89,10 +82,10 @@ function secondsToTimestamp(seconds: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-function formatChunkSummary(chunk: RankedChunk): string {
+function formatGroundedExcerpt(chunk: RankedChunk, index: number): string {
   const from = secondsToTimestamp(chunk.startSec);
   const to = secondsToTimestamp(chunk.endSec);
-  return `Отрывок ${chunk.chunkIndex + 1} [${from}–${to}]:\n${chunk.text}`;
+  return `S${index + 1}: ${chunk.text}\n(start=${from}, end=${to})`;
 }
 
 function renderActionItems(actionItems: unknown): string | null {
@@ -198,16 +191,31 @@ async function textSearch(
   limit: number,
   storage: TsvStorage
 ): Promise<RetrievedChunk[]> {
-  if (storage !== "tsvector") {
+  if (!question.trim()) {
     return [];
   }
+
+  if (storage === "tsvector") {
+    const query = await sql<RetrievedChunk>`
+      SELECT id, chunk_index, start_sec, end_sec, text,
+             ts_rank(tsv, plainto_tsquery('russian', ${question})) AS rank
+      FROM recording_chunks
+      WHERE recording_id = ${recordingId}
+        AND tsv @@ plainto_tsquery('russian', ${question})
+      ORDER BY rank DESC
+      LIMIT ${limit}
+    `.execute(db);
+    return query.rows ?? [];
+  }
+
+  const likePattern = `%${question.trim().replace(/\s+/g, "%")}%`;
   const query = await sql<RetrievedChunk>`
     SELECT id, chunk_index, start_sec, end_sec, text,
-           ts_rank(tsv, plainto_tsquery('russian', ${question})) AS rank
+           CASE WHEN text ILIKE ${likePattern} THEN 1 ELSE 0 END AS rank
     FROM recording_chunks
     WHERE recording_id = ${recordingId}
-      AND tsv @@ plainto_tsquery('russian', ${question})
-    ORDER BY rank DESC
+      AND text ILIKE ${likePattern}
+    ORDER BY chunk_index ASC
     LIMIT ${limit}
   `.execute(db);
   return query.rows ?? [];
@@ -262,21 +270,92 @@ function mergeChunks(vector: RetrievedChunk[], text: RetrievedChunk[]): RankedCh
   return results.sort((a, b) => b.score - a.score);
 }
 
-async function buildAnswer(
+async function expandWithNeighbors(
+  db: Database,
+  recordingId: string,
+  base: RankedChunk[],
+  limit: number
+): Promise<RankedChunk[]> {
+  if (!base.length) {
+    return [];
+  }
+
+  const scoreByIndex = new Map<number, number>();
+  for (const chunk of base.slice(0, 3)) {
+    scoreByIndex.set(chunk.chunkIndex, Math.max(scoreByIndex.get(chunk.chunkIndex) ?? 0, chunk.score));
+    const neighborScore = chunk.score * 0.9;
+    const prevIndex = chunk.chunkIndex - 1;
+    const nextIndex = chunk.chunkIndex + 1;
+    if (neighborScore > 0) {
+      scoreByIndex.set(prevIndex, Math.max(scoreByIndex.get(prevIndex) ?? 0, neighborScore));
+      scoreByIndex.set(nextIndex, Math.max(scoreByIndex.get(nextIndex) ?? 0, neighborScore));
+    }
+  }
+
+  const resultByIndex = new Map<number, RankedChunk>();
+  for (const chunk of base) {
+    resultByIndex.set(chunk.chunkIndex, chunk);
+  }
+
+  const missingIndexes = Array.from(scoreByIndex.keys()).filter((index) => !resultByIndex.has(index));
+  if (missingIndexes.length) {
+    const placeholders = sql.join(missingIndexes.map((idx) => sql`${idx}`), sql`, `);
+    const neighbors = await sql<RetrievedChunk>`
+      SELECT id, chunk_index, start_sec, end_sec, text
+      FROM recording_chunks
+      WHERE recording_id = ${recordingId}
+        AND chunk_index IN (${placeholders})
+    `.execute(db);
+    for (const neighbor of neighbors.rows ?? []) {
+      const score = scoreByIndex.get(neighbor.chunk_index) ?? 0;
+      resultByIndex.set(neighbor.chunk_index, {
+        id: neighbor.id,
+        chunkIndex: neighbor.chunk_index,
+        startSec: Number(neighbor.start_sec) || 0,
+        endSec: Number(neighbor.end_sec) || 0,
+        text: neighbor.text,
+        score,
+      });
+    }
+  }
+
+  const expanded = Array.from(resultByIndex.values());
+  expanded.sort((a, b) => {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    return a.chunkIndex - b.chunkIndex;
+  });
+
+  return expanded.slice(0, Math.max(1, limit));
+}
+
+function evaluateSupport(
+  chunks: RankedChunk[],
+  minCombined: number,
+  minSupport: number
+): SupportEvaluation {
+  const maxScore = chunks.reduce((max, chunk) => Math.max(max, chunk.score), 0);
+  const supportCount = chunks.length;
+  const ok = supportCount >= minSupport && maxScore >= minCombined;
+  return { maxScore, supportCount, ok };
+}
+
+async function answerGrounded(
   client: OpenAI,
   question: string,
   chunks: RankedChunk[]
 ): Promise<string> {
-  const context = chunks.map(formatChunkSummary).join("\n\n");
+  const context = chunks.map((chunk, idx) => formatGroundedExcerpt(chunk, idx)).join("\n\n");
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     {
       role: "system",
       content:
-        "Ты помощник по аналитике встреч. Отвечай только на основе предоставленных отрывков. Если информации недостаточно, ответь 'не найдено'. В ответе укажи ссылки на таймкоды формата 00:MM:SS–00:MM:SS для каждого факта.",
+        "Ты помощник, отвечай ТОЛЬКО по отрывкам (S1..Sn). Если факта нет в них — не придумывай.\nФормат:\n- Короткий ответ по делу.\n- Указывай источники в конце каждого пункта в виде [S#, 00:MM:SS–00:MM:SS].",
     },
     {
       role: "user",
-      content: `Вопрос: ${question}\n\nКонтекст:\n${context}`,
+      content: `Отрывки:\n${context}\n\nВопрос: "${question}"`,
     },
   ];
 
@@ -284,6 +363,55 @@ async function buildAnswer(
     model: "gpt-4o-mini",
     temperature: 0.2,
     max_tokens: 500,
+    messages,
+  });
+
+  const content = completion.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("LLM did not return a response");
+  }
+  return content.trim();
+}
+
+interface SpeculativeContext {
+  summary: string | null;
+  near: RankedChunk[];
+}
+
+async function answerSpeculative(
+  client: OpenAI,
+  question: string,
+  ctx: SpeculativeContext
+): Promise<string> {
+  const summary = ctx.summary?.trim() ?? "нет доступного резюме";
+  const fragments = ctx.near.slice(0, 2);
+  const fragmentsBlock = fragments.length
+    ? [
+        "- фрагменты:",
+        ...fragments.map((chunk, idx) => {
+          const from = secondsToTimestamp(chunk.startSec);
+          const to = secondsToTimestamp(chunk.endSec);
+          return `  S${idx + 1}: ${chunk.text} (start=${from}, end=${to})`;
+        }),
+      ].join("\n")
+    : "- фрагменты: нет релевантных отрывков";
+
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    {
+      role: "system",
+      content:
+        "Ты помощник. В отрывках нет достаточных оснований для точного ответа. Дай осторожное предположение по общему контексту записи (если уместно), начиная фразой:\n\"Я не уверен, что это звучало в разговоре. По контексту записи могу предположить: ...\"\nНе ссылайся на источники и не выдавай выдуманные детали.",
+    },
+    {
+      role: "user",
+      content: `Контекст (краткое резюме и/или близкие по смыслу фрагменты, если есть):\n- summary: "${summary}"\n${fragmentsBlock}\nВопрос: "${question}"`,
+    },
+  ];
+
+  const completion = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.3,
+    max_tokens: 400,
     messages,
   });
 
@@ -341,18 +469,23 @@ export function createQaRouter({ db, config, openAiClient }: QaRouterDeps) {
       question,
     });
 
-    if (isSummaryQuestion(question)) {
+    const summaryText = typeof recording.transcriptSummary === "string" ? recording.transcriptSummary.trim() : "";
+    if (isSummaryQuestion(question) && summaryText) {
       return res.json({
-        answer: recording.transcriptSummary ?? "Краткое содержание недоступно.",
+        answer: summaryText,
         sources: [],
+        speculative: false,
       });
     }
 
-    if (isActionItemsQuestion(question)) {
-      const formatted = renderActionItems(recording.actionItemsJson);
+    const formattedActionItems = isActionItemsQuestion(question)
+      ? renderActionItems(recording.actionItemsJson)
+      : null;
+    if (formattedActionItems) {
       return res.json({
-        answer: formatted ?? "Action items недоступны для этой записи.",
+        answer: formattedActionItems,
         sources: [],
+        speculative: false,
       });
     }
 
@@ -366,6 +499,69 @@ export function createQaRouter({ db, config, openAiClient }: QaRouterDeps) {
       const storage = await storagePromise;
       const tsvStorage = await tsvStoragePromise;
 
+      const countRow = await db
+        .selectFrom("recording_chunks")
+        .select(({ fn }) => fn.countAll().as("count"))
+        .where("recording_id", "=", recordingId)
+        .executeTakeFirst();
+      const chunkCount = Number(countRow?.count ?? 0);
+
+      const maxChunks = config.qa.response.maxChunks;
+      const retrievalCfg = config.qa.retrieval;
+
+      if (chunkCount > 0 && chunkCount <= 3) {
+        const rawChunks = await sql<RetrievedChunk>`
+          SELECT id, chunk_index, start_sec, end_sec, text
+          FROM recording_chunks
+          WHERE recording_id = ${recordingId}
+          ORDER BY chunk_index ASC
+        `.execute(db);
+        const direct = (rawChunks.rows ?? []).map((row) => ({
+          id: row.id,
+          chunkIndex: row.chunk_index,
+          startSec: Number(row.start_sec) || 0,
+          endSec: Number(row.end_sec) || 0,
+          text: row.text,
+          score: 1,
+        }));
+
+        if (!direct.length) {
+          const speculativeAnswer = await answerSpeculative(openAiClient, question, {
+            summary: summaryText || null,
+            near: [],
+          });
+          logger.info("[qa] retrieval_metrics", {
+            recording_id: recordingId,
+            user_id: req.user.id,
+            mode: "speculative",
+            max_score: 0,
+            support_count: 0,
+            rewritten: false,
+          });
+          return res.json({ answer: speculativeAnswer, sources: [], speculative: true });
+        }
+
+        const used = direct.slice(0, maxChunks);
+        const answer = await answerGrounded(openAiClient, question, used);
+        logger.info("[qa] retrieval_metrics", {
+          recording_id: recordingId,
+          user_id: req.user.id,
+          mode: "grounded",
+          max_score: 1,
+          support_count: used.length,
+          rewritten: false,
+        });
+        return res.json({
+          answer,
+          sources: used.map((chunk) => ({
+            chunk_id: chunk.id,
+            start_sec: chunk.startSec,
+            end_sec: chunk.endSec,
+          })),
+          speculative: false,
+        });
+      }
+
       const embeddingResponse = await openAiClient.embeddings.create({
         model: config.embeddings.model,
         input: [`query: ${question}`],
@@ -373,32 +569,60 @@ export function createQaRouter({ db, config, openAiClient }: QaRouterDeps) {
       const queryEmbedding = sanitizeEmbedding(embeddingResponse.data[0]?.embedding as number[]);
 
       const [vectorResults, textResults] = await Promise.all([
-        vectorSearch(db, recordingId, queryEmbedding, 8, storage),
-        textSearch(db, recordingId, question, 8, tsvStorage),
+        vectorSearch(db, recordingId, queryEmbedding, retrievalCfg.topKVector, storage),
+        textSearch(db, recordingId, question, retrievalCfg.topKBm25, tsvStorage),
       ]);
 
       let merged = mergeChunks(vectorResults, textResults);
       if (!merged.length && vectorResults.length === 0 && textResults.length === 0) {
-        const vectorFallback = await vectorSearch(db, recordingId, queryEmbedding, 16, storage);
-        const textFallback = await textSearch(db, recordingId, question, 16, tsvStorage);
+        const vectorFallback = await vectorSearch(
+          db,
+          recordingId,
+          queryEmbedding,
+          Math.max(retrievalCfg.topKVector * 2, retrievalCfg.topKVector + 4),
+          storage
+        );
+        const textFallback = await textSearch(
+          db,
+          recordingId,
+          question,
+          Math.max(retrievalCfg.topKBm25 * 2, retrievalCfg.topKBm25 + 4),
+          tsvStorage
+        );
         merged = mergeChunks(vectorFallback, textFallback);
       }
 
-      const topChunks = merged.slice(0, 5);
-      if (!topChunks.length) {
-        return res.json({ answer: "не найдено", sources: [] });
+      const expanded = await expandWithNeighbors(db, recordingId, merged, maxChunks);
+      const support = evaluateSupport(expanded, retrievalCfg.minCombinedScore, retrievalCfg.minSupport);
+      const mode = expanded.length && support.ok ? "grounded" : "speculative";
+
+      logger.info("[qa] retrieval_metrics", {
+        recording_id: recordingId,
+        user_id: req.user.id,
+        mode,
+        max_score: support.maxScore,
+        support_count: support.supportCount,
+        rewritten: false,
+      });
+
+      if (expanded.length && support.ok) {
+        const answer = await answerGrounded(openAiClient, question, expanded);
+        return res.json({
+          answer,
+          sources: expanded.map((chunk) => ({
+            chunk_id: chunk.id,
+            start_sec: chunk.startSec,
+            end_sec: chunk.endSec,
+          })),
+          speculative: false,
+        });
       }
 
-      const answer = await buildAnswer(openAiClient, question, topChunks);
-
-      return res.json({
-        answer,
-        sources: topChunks.map((chunk) => ({
-          chunk_id: chunk.id,
-          start_sec: chunk.startSec,
-          end_sec: chunk.endSec,
-        })),
+      const speculativeAnswer = await answerSpeculative(openAiClient, question, {
+        summary: summaryText || null,
+        near: expanded.slice(0, 2),
       });
+      return res.json({ answer: speculativeAnswer, sources: [], speculative: true });
     } catch (error: any) {
       logger.error("[qa] failed", {
         recording_id: recordingId,

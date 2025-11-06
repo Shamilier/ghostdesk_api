@@ -40,6 +40,11 @@ const envSchema = z.object({
   EMBEDDINGS_MODEL: z.string().default("text-embedding-3-small"),
   EMBEDDINGS_BATCH_SIZE: z.coerce.number().int().positive().default(128),
   EMBEDDINGS_MAX_RETRIES: z.coerce.number().int().positive().default(5),
+  RETRIEVAL_MIN_COMBINED: z.coerce.number().min(0).max(1).default(0.35),
+  RETRIEVAL_MIN_SUPPORT: z.coerce.number().int().min(1).default(2),
+  RETRIEVAL_TOPK_VECTOR: z.coerce.number().int().positive().default(8),
+  RETRIEVAL_TOPK_BM25: z.coerce.number().int().positive().default(8),
+  RESPONSE_MAX_CHUNKS: z.coerce.number().int().positive().max(10).default(5),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -99,6 +104,17 @@ export function loadConfig() {
       model: cfg.EMBEDDINGS_MODEL,
       batchSize: cfg.EMBEDDINGS_BATCH_SIZE,
       maxRetries: cfg.EMBEDDINGS_MAX_RETRIES,
+    },
+    qa: {
+      retrieval: {
+        minCombinedScore: cfg.RETRIEVAL_MIN_COMBINED,
+        minSupport: cfg.RETRIEVAL_MIN_SUPPORT,
+        topKVector: cfg.RETRIEVAL_TOPK_VECTOR,
+        topKBm25: cfg.RETRIEVAL_TOPK_BM25,
+      },
+      response: {
+        maxChunks: cfg.RESPONSE_MAX_CHUNKS,
+      },
     },
     transcription: {
       deepgramApiKey: cfg.DEEPGRAM_API_KEY ?? "",

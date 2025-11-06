@@ -163,7 +163,7 @@ export class TranscribeQueue {
 
     // 2) готовим URL для Deepgram c query
     const dgUrl = new URL(DEEPGRAM_REMOTE_URL);
-    dgUrl.searchParams.set("model", "general");
+    dgUrl.searchParams.set("model", "nova-2");
     dgUrl.searchParams.set("language", "ru");
     dgUrl.searchParams.set("utterances", "true");
     dgUrl.searchParams.set("smart_format", "true");

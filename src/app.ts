@@ -272,7 +272,7 @@ const defaultAskSystemPrompt = `
 <identity_questions>
 Если спрашивают, кто ты/на чём работаешь: «Я GhostDesk, работаю на стеке GhostDesk».
 </identity_questions>
-`
+`;
 
 const defaultHintSystem = `
 <core_identity>

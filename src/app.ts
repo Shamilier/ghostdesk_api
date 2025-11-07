@@ -66,9 +66,16 @@ function maskKey(token: string): string {
   return `${token.slice(0, 4)}…${token.slice(-4)}`;
 }
 
-function logAuthUsage(endpoint: string, token: string | null) {
+function logAuthUsage(
+  endpoint: string,
+  token: string | null,
+  user?: { id?: string; plan?: string }
+) {
   const masked = token ? maskKey(token) : "<missing>";
-  logger.info("auth.usage", { endpoint, token: masked });
+  const payload: Record<string, unknown> = { endpoint, token: masked };
+  if (user?.id) payload.user_id = user.id;
+  if (user?.plan) payload.plan = user.plan;
+  logger.info("auth.usage", payload);
 }
 
 function formatSmartText(text: string, smart: boolean): string {
@@ -379,14 +386,19 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
 
   app.use("/v1/ask", qaRateLimit, auth, createQaRouter({ db, config, openAiClient: client }));
 
-  app.post("/hint", async (req, res) => {
+  app.post("/hint", qaRateLimit, auth, async (req, res) => {
     if (!client) {
       return res.status(500).json({ error: "OpenAI client is not configured" });
     }
 
     try {
       const token = readAuthKey(req);
-      logAuthUsage("/hint", token);
+      const authUser = req.user;
+      if (!authUser) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      logAuthUsage("/hint", token, authUser);
 
       const sessionId = String(req.body?.sessionId ?? "default");
       const instruction = String(req.body?.instruction ?? "").trim();
@@ -484,14 +496,19 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     }
   });
 
-  app.post("/ask", upload.single("image"), async (req, res) => {
+  app.post("/ask", qaRateLimit, auth, upload.single("image"), async (req, res) => {
     if (!client) {
       return res.status(500).json({ error: "OpenAI client is not configured" });
     }
 
     try {
       const token = readAuthKey(req);
-      logAuthUsage("/ask", token);
+      const authUser = req.user;
+      if (!authUser) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      logAuthUsage("/ask", token, authUser);
 
       const question = String(req.body.question ?? "").trim();
       const smart = String(req.body.smart ?? "false") === "true";
@@ -541,62 +558,75 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     }
   });
 
-  app.post("/ask_without_query", upload.single("image"), async (req, res) => {
-    if (!client) {
-      return res.status(500).json({ error: "OpenAI client is not configured" });
-    }
-
-    try {
-      const token = readAuthKey(req);
-      logAuthUsage("/ask_without_query", token);
-
-      const smart = String(req.body.smart ?? "false") === "true";
-      const sessionId = String(req.body.sessionId ?? "default");
-      const question = typeof req.body?.question === "string" ? req.body.question.trim() : "";
-      const transcript = typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
-
-      if (!req.file) return res.status(400).json({ error: "No image" });
-      if (!question && !transcript) {
-        return res.status(400).json({ error: "Empty transcript" });
+  app.post(
+    "/ask_without_query",
+    qaRateLimit,
+    auth,
+    upload.single("image"),
+    async (req, res) => {
+      if (!client) {
+        return res.status(500).json({ error: "OpenAI client is not configured" });
       }
 
-      const b64 = req.file.buffer.toString("base64");
-      const dataUrl = `data:image/png;base64,${b64}`;
-
-      const content: ChatMsg["content"] = [];
-      if (question) {
-        content.push({ type: "text", text: formatSmartText(question, smart) });
-      }
-      if (transcript) {
-        content.push({ type: "text", text: buildTranscriptBlock(transcript) });
-      }
-      content.push({ type: "image_url", image_url: { url: dataUrl } });
-
-      const user: ChatMsg = {
-        role: "user",
-        content,
-      };
-
-      await streamAskLikeResponse({
-        res,
-        sessionId,
-        user,
-        debugLabel: "/ask_without_query",
-        maxTokens: 500,
-        temperature: 0.2,
-        client,
-      });
-    } catch (e: any) {
-      if (!res.headersSent) {
-        return res.status(500).json({ error: e?.message ?? "Internal error" });
-      }
       try {
-        res.write(`data: ${JSON.stringify({ type: "error", message: String(e?.message ?? e) })}\n\n`);
-      } finally {
-        res.end();
+        const token = readAuthKey(req);
+        const authUser = req.user;
+        if (!authUser) {
+          return res.status(401).json({ error: "Unauthorized" });
+        }
+
+        logAuthUsage("/ask_without_query", token, authUser);
+
+        const smart = String(req.body.smart ?? "false") === "true";
+        const sessionId = String(req.body.sessionId ?? "default");
+        const question =
+          typeof req.body?.question === "string" ? req.body.question.trim() : "";
+        const transcript =
+          typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
+
+        if (!req.file) return res.status(400).json({ error: "No image" });
+        if (!question && !transcript) {
+          return res.status(400).json({ error: "Empty transcript" });
+        }
+
+        const b64 = req.file.buffer.toString("base64");
+        const dataUrl = `data:image/png;base64,${b64}`;
+
+        const content: ChatMsg["content"] = [];
+        if (question) {
+          content.push({ type: "text", text: formatSmartText(question, smart) });
+        }
+        if (transcript) {
+          content.push({ type: "text", text: buildTranscriptBlock(transcript) });
+        }
+        content.push({ type: "image_url", image_url: { url: dataUrl } });
+
+        const user: ChatMsg = {
+          role: "user",
+          content,
+        };
+
+        await streamAskLikeResponse({
+          res,
+          sessionId,
+          user,
+          debugLabel: "/ask_without_query",
+          maxTokens: 500,
+          temperature: 0.2,
+          client,
+        });
+      } catch (e: any) {
+        if (!res.headersSent) {
+          return res.status(500).json({ error: e?.message ?? "Internal error" });
+        }
+        try {
+          res.write(`data: ${JSON.stringify({ type: "error", message: String(e?.message ?? e) })}\n\n`);
+        } finally {
+          res.end();
+        }
       }
     }
-  });
+  );
 
   return app;
 }

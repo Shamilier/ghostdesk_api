@@ -75,7 +75,17 @@ export function createTestConfig(): AppConfig {
       maxConcurrency: 3,
     },
     publicAppOrigin: "http://localhost:3000",
-  } as const;
+    usageLimits: {
+      windowMs: 60 * 60 * 1000,
+      defaultPlan: "free",
+      plans: {
+        free: { hint: 16, ask: 31 },
+        pro: { hint: 200, ask: 200 },
+        premium: { hint: 200, ask: 200 },
+        admin: null,
+      },
+    },
+  };
 }
 
 export function createTestApp(config: AppConfig, db: Database, s3Client: S3Client) {

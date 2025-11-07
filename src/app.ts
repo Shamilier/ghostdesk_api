@@ -10,6 +10,7 @@ import { collectMetrics, metricsContentType } from "./lib/metrics";
 import { ProfileCache } from "./lib/profileCache";
 import { requireUser } from "./middleware/requireUser";
 import { createRateLimiter } from "./middleware/rateLimit";
+import { createPlanUsageLimiter } from "./middleware/planUsageLimit";
 import { createRecordingsRouter } from "./modules/recordings/router";
 import { EmbeddingIngestQueue } from "./modules/embeddings/ingestQueue";
 import { createQaRouter } from "./modules/qa/router";
@@ -351,6 +352,7 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
   const auth = requireUser({ config, cache: profileCache });
   const recordingsRateLimit = createRateLimiter({ windowMs: 60_000, limit: 120 });
   const qaRateLimit = createRateLimiter({ windowMs: 60_000, limit: 60 });
+  const planUsageLimiter = createPlanUsageLimiter(config.usageLimits);
 
   const embeddingQueue = new EmbeddingIngestQueue({
     config,
@@ -510,50 +512,63 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
 
       logAuthUsage("/ask", token, authUser);
 
-      const question = String(req.body.question ?? "").trim();
-      const smart = String(req.body.smart ?? "false") === "true";
-      const sessionId = String(req.body.sessionId ?? "default");
-      const transcript = typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
-
-      if (!question) return res.status(400).json({ error: "Empty question" });
-      if (!req.file) return res.status(400).json({ error: "No image" });
-
-      const b64 = req.file.buffer.toString("base64");
-      const dataUrl = `data:image/png;base64,${b64}`;
-
-      const content: ChatMsg["content"] = [{ type: "text", text: formatSmartText(question, smart) }];
-
-      if (transcript) {
-        const block = buildTranscriptBlock(transcript);
-        if (block) {
-          content.push({ type: "text", text: block });
-        }
-      }
-
-      content.push({ type: "image_url", image_url: { url: dataUrl } });
-
-      const user: ChatMsg = {
-        role: "user",
-        content,
-      };
-
-      await streamAskLikeResponse({
-        res,
-        sessionId,
-        user,
-        debugLabel: "/ask",
-        maxTokens: 500,
-        temperature: 0.2,
-        client,
-      });
-    } catch (e: any) {
-      if (!res.headersSent) {
-        return res.status(500).json({ error: e?.message ?? "Internal error" });
-      }
       try {
-        res.write(`data: ${JSON.stringify({ type: "error", message: String(e?.message ?? e) })}\n\n`);
-      } finally {
-        res.end();
+        const token = readAuthKey(req);
+        const authUser = req.user;
+        if (!authUser) {
+          return res.status(401).json({ error: "Unauthorized" });
+        }
+
+        logAuthUsage("/ask", token, authUser);
+
+        const question = String(req.body.question ?? "").trim();
+        const smart = String(req.body.smart ?? "false") === "true";
+        const sessionId = String(req.body.sessionId ?? "default");
+        const transcript =
+          typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
+
+        if (!question) return res.status(400).json({ error: "Empty question" });
+        if (!req.file) return res.status(400).json({ error: "No image" });
+
+        const b64 = req.file.buffer.toString("base64");
+        const dataUrl = `data:image/png;base64,${b64}`;
+
+        const content: ChatMsg["content"] = [
+          { type: "text", text: formatSmartText(question, smart) },
+        ];
+
+        if (transcript) {
+          const block = buildTranscriptBlock(transcript);
+          if (block) {
+            content.push({ type: "text", text: block });
+          }
+        }
+
+        content.push({ type: "image_url", image_url: { url: dataUrl } });
+
+        const user: ChatMsg = {
+          role: "user",
+          content,
+        };
+
+        await streamAskLikeResponse({
+          res,
+          sessionId,
+          user,
+          debugLabel: "/ask",
+          maxTokens: 500,
+          temperature: 0.2,
+          client,
+        });
+      } catch (e: any) {
+        if (!res.headersSent) {
+          return res.status(500).json({ error: e?.message ?? "Internal error" });
+        }
+        try {
+          res.write(`data: ${JSON.stringify({ type: "error", message: String(e?.message ?? e) })}\n\n`);
+        } finally {
+          res.end();
+        }
       }
     }
   });

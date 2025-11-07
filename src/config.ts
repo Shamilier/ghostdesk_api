@@ -45,6 +45,9 @@ const envSchema = z.object({
   RETRIEVAL_TOPK_VECTOR: z.coerce.number().int().positive().default(8),
   RETRIEVAL_TOPK_BM25: z.coerce.number().int().positive().default(8),
   RESPONSE_MAX_CHUNKS: z.coerce.number().int().positive().max(10).default(5),
+  USAGE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
+  USAGE_LIMITS_JSON: z.string().optional(),
+  USAGE_LIMIT_DEFAULT_PLAN: z.string().default("free"),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -75,6 +78,51 @@ export function loadConfig() {
 
   if (!cfg.DEEPGRAM_API_KEY) {
     console.warn("[config] DEEPGRAM_API_KEY is not set; transcription queue will be disabled");
+  }
+
+  const defaultPlanLimits = {
+    free: { hint: 16, ask: 31 },
+    pro: { hint: 200, ask: 200 },
+    premium: { hint: 200, ask: 200 },
+    admin: null,
+  } as const;
+
+  type PlanLimits = { hint: number; ask: number } | null;
+
+  let planLimits: Record<string, PlanLimits> = { ...defaultPlanLimits };
+
+  const limitsJson = cfg.USAGE_LIMITS_JSON;
+  if (limitsJson) {
+    try {
+      const parsed = JSON.parse(limitsJson) as Record<string, unknown>;
+      const normalized: Record<string, PlanLimits> = {};
+      for (const [planName, value] of Object.entries(parsed)) {
+        const key = planName.toLowerCase();
+        if (value === null) {
+          normalized[key] = null;
+          continue;
+        }
+        if (typeof value !== "object" || value === null) {
+          throw new Error(`Invalid usage limit entry for plan '${planName}'`);
+        }
+        const record = value as Record<string, unknown>;
+        const hint = Number(record.hint);
+        const ask = Number(record.ask);
+        if (!Number.isFinite(hint) || hint < 0 || !Number.isFinite(ask) || ask < 0) {
+          throw new Error(`Invalid hint/ask limit for plan '${planName}'`);
+        }
+        normalized[key] = { hint: Math.trunc(hint), ask: Math.trunc(ask) };
+      }
+      planLimits = Object.keys(normalized).length ? normalized : planLimits;
+    } catch (error: any) {
+      console.error(`[config] Failed to parse USAGE_LIMITS_JSON: ${error?.message ?? error}`);
+      process.exit(1);
+    }
+  }
+
+  const defaultPlan = (cfg.USAGE_LIMIT_DEFAULT_PLAN || "free").toLowerCase();
+  if (!planLimits[defaultPlan]) {
+    planLimits[defaultPlan] = planLimits.free ?? { hint: 16, ask: 31 };
   }
 
   return {
@@ -123,5 +171,10 @@ export function loadConfig() {
       maxConcurrency: cfg.TRANSCRIBE_MAX_CONCURRENCY,
     },
     publicAppOrigin: cfg.PUBLIC_APP_ORIGIN,
+    usageLimits: {
+      windowMs: cfg.USAGE_LIMIT_WINDOW_MS,
+      plans: planLimits,
+      defaultPlan,
+    },
   } as const;
 }

@@ -386,9 +386,15 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     createRecordingsRouter({ db, config, s3Client, transcribeQueue })
   );
 
-  app.use("/v1/ask", qaRateLimit, auth, createQaRouter({ db, config, openAiClient: client }));
+  app.use(
+    "/v1/ask",
+    qaRateLimit,
+    auth,
+    planUsageLimiter.limit("ask"),
+    createQaRouter({ db, config, openAiClient: client })
+  );
 
-  app.post("/hint", qaRateLimit, auth, async (req, res) => {
+  app.post("/hint", qaRateLimit, auth, planUsageLimiter.limit("hint"), async (req, res) => {
     if (!client) {
       return res.status(500).json({ error: "OpenAI client is not configured" });
     }
@@ -498,84 +504,92 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     }
   });
 
- app.post("/ask", qaRateLimit, auth, upload.single("image"), async (req, res) => {
-  if (!client) {
-    return res.status(500).json({ error: "OpenAI client is not configured" });
-  }
+  app.post(
+    "/ask",
+    qaRateLimit,
+    auth,
+    planUsageLimiter.limit("ask"),
+    upload.single("image"),
+    async (req, res) => {
+      if (!client) {
+        return res.status(500).json({ error: "OpenAI client is not configured" });
+      }
 
-  const token = readAuthKey(req);
-  const authUser = req.user;
-  if (!authUser) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  logAuthUsage("/ask", token, authUser);
+      const token = readAuthKey(req);
+      const authUser = req.user;
+      if (!authUser) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      logAuthUsage("/ask", token, authUser);
 
-  const question = String(req.body.question ?? "").trim();
-  const smart =
-    String(req.body.smart ?? "false").toLowerCase() === "true" || req.body.smart === true;
-  const sessionId = String(req.body.sessionId ?? "default");
-  const transcript =
-    typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
+      const question = String(req.body.question ?? "").trim();
+      const smart =
+        String(req.body.smart ?? "false").toLowerCase() === "true" || req.body.smart === true;
+      const sessionId = String(req.body.sessionId ?? "default");
+      const transcript =
+        typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
 
-  if (!question) return res.status(400).json({ error: "Empty question" });
-  if (!req.file) return res.status(400).json({ error: "No image file uploaded" });
+      if (!question) return res.status(400).json({ error: "Empty question" });
+      if (!req.file) return res.status(400).json({ error: "No image file uploaded" });
 
-  const mime = req.file.mimetype || "image/png";
-  const allowed = new Set(["image/png", "image/jpeg", "image/webp"]);
-  if (!allowed.has(mime)) {
-    return res.status(400).json({ error: `Unsupported image type: ${mime}` });
-  }
+      const mime = req.file.mimetype || "image/png";
+      const allowed = new Set(["image/png", "image/jpeg", "image/webp"]);
+      if (!allowed.has(mime)) {
+        return res.status(400).json({ error: `Unsupported image type: ${mime}` });
+      }
 
-  const b64 = req.file.buffer.toString("base64");
-  const dataUrl = `data:${mime};base64,${b64}`;
+      const b64 = req.file.buffer.toString("base64");
+      const dataUrl = `data:${mime};base64,${b64}`;
 
-  const content: ChatMsg["content"] = [
-    { type: "text", text: formatSmartText(question, smart) },
-  ];
+      const content: ChatMsg["content"] = [
+        { type: "text", text: formatSmartText(question, smart) },
+      ];
 
-  if (transcript) {
-    const block = buildTranscriptBlock(transcript);
-    if (block) content.push({ type: "text", text: block });
-  }
+      if (transcript) {
+        const block = buildTranscriptBlock(transcript);
+        if (block) content.push({ type: "text", text: block });
+      }
 
-  content.push({ type: "image_url", image_url: { url: dataUrl } });
+      content.push({ type: "image_url", image_url: { url: dataUrl } });
 
-  const userMsg: ChatMsg = { role: "user", content };
+      const userMsg: ChatMsg = { role: "user", content };
 
-  try {
-    await streamAskLikeResponse({
-      res,
-      sessionId,
-      user: userMsg,
-      debugLabel: "/ask",
-      maxTokens: 500,
-      temperature: 0.2,
-      client,
-    });
-  } catch (e: any) {
-    // Если ещё не стримили — обычный JSON 500
-    if (!res.headersSent) {
-      return res.status(500).json({ error: e?.message ?? "Internal error" });
+      try {
+        await streamAskLikeResponse({
+          res,
+          sessionId,
+          user: userMsg,
+          debugLabel: "/ask",
+          maxTokens: 500,
+          temperature: 0.2,
+          client,
+        });
+      } catch (e: any) {
+        // Если ещё не стримили — обычный JSON 500
+        if (!res.headersSent) {
+          return res.status(500).json({ error: e?.message ?? "Internal error" });
+        }
+        // Если уже шёл SSE — дожмём событием и закроем поток
+        try {
+          res.write(
+            `data: ${JSON.stringify({
+              type: "error",
+              message: String(e?.message ?? e),
+            })}\n\n`,
+          );
+        } finally {
+          res.end();
+        }
+      }
     }
-    // Если уже шёл SSE — дожмём событием и закроем поток
-    try {
-      res.write(
-        `data: ${JSON.stringify({
-          type: "error",
-          message: String(e?.message ?? e),
-        })}\n\n`,
-      );
-    } finally {
-      res.end();
-    }
-  }
-});
+  });
 
 
   app.post(
     "/ask_without_query",
     qaRateLimit,
     auth,
+    planUsageLimiter.limit("ask"),
     upload.single("image"),
     async (req, res) => {
       if (!client) {

@@ -26,6 +26,9 @@ Copy `.env.example` and adjust the values:
 - `AUTH_PROFILE_URL` – absolute URL of the Web portal endpoint (`GET /oauth/profile`). Requests are proxied with the same Bearer token.
 - `AUTH_TIMEOUT_MS` – timeout for profile lookups (default `3000`).
 - `AUTH_CACHE_TTL_MS` – LRU cache TTL for successful profiles in milliseconds (default `300000`).
+- `USAGE_LIMIT_WINDOW_MS` – length of the rolling quota window in milliseconds (default one hour).
+- `USAGE_LIMIT_DEFAULT_PLAN` – plan slug to fall back to when the profile lacks a `plan` field (`free` by default).
+- `USAGE_LIMITS_JSON` – JSON map `{ "plan": { "hint": number, "ask": number } }`; use `null` for unlimited plans.
 
 ## Authentication pipeline
 

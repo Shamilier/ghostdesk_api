@@ -1,0 +1,3 @@
+1. Added src/services/tokenWallet.ts with configureTokenWallet helper, debitTokensForUser call wrapper, and InsufficientTokensError to talk to the portal's /internal/users/:id/tokens/debit endpoint using the existing auth profile base URL, propagate insufficient balance, and log/throw on transport failures.
+2. Registered the token wallet in src/app.ts, wired requireUser-protected POST /v1/usage/asr-tick to debit one token via the helper, and mapped InsufficientTokensError to a 402 API response exposing the remaining balance.
+3. Covered the new behavior with tokenWallet Vitest unit coverage and an integration test for POST /v1/usage/asr-tick that stubs the portal responses and asserts headers plus JSON payloads.

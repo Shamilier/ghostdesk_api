@@ -15,6 +15,11 @@ import { createRecordingsRouter } from "./modules/recordings/router";
 import { EmbeddingIngestQueue } from "./modules/embeddings/ingestQueue";
 import { createQaRouter } from "./modules/qa/router";
 import { TranscribeQueue } from "./transcribeQueue";
+import {
+  configureTokenWallet,
+  debitTokensForUser,
+  InsufficientTokensError,
+} from "./services/tokenWallet";
 
 export interface AppDependencies {
   config: AppConfig;
@@ -354,6 +359,8 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
   const qaRateLimit = createRateLimiter({ windowMs: 60_000, limit: 60 });
   const planUsageLimiter = createPlanUsageLimiter(config.usageLimits);
 
+  configureTokenWallet({ config });
+
   const embeddingQueue = new EmbeddingIngestQueue({
     config,
     db,
@@ -393,6 +400,25 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     planUsageLimiter.limit("ask"),
     createQaRouter({ db, config, openAiClient: client })
   );
+
+  app.post("/v1/usage/asr-tick", auth, async (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    try {
+      const result = await debitTokensForUser(req.user.id, 1);
+      return res.status(200).json(result);
+    } catch (error) {
+      if (error instanceof InsufficientTokensError) {
+        return res.status(402).json({
+          error: "insufficient_tokens",
+          token_balance: error.tokenBalance,
+        });
+      }
+      return next(error);
+    }
+  });
 
   app.post("/hint", qaRateLimit, auth, planUsageLimiter.limit("hint"), async (req, res) => {
     if (!client) {

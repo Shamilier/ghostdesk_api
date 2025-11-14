@@ -110,10 +110,8 @@ export async function debitTokensForUser(
     return { token_balance: balance };
   }
 
-  if (
-    (response.status === 402 || response.status === 403) &&
-    payload?.error === "insufficient_tokens"
-  ) {
+  // 🔴 токены закончились — не важно, 402/403/409, смотрим на error
+  if (payload?.error === "insufficient_tokens") {
     const balance = parseTokenBalance(payload?.token_balance);
     if (balance === null) {
       logger.error("token_wallet.invalid_insufficient_payload", {
@@ -140,3 +138,4 @@ export async function debitTokensForUser(
   });
   throw new Error("Failed to debit tokens");
 }
+

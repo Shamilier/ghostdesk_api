@@ -409,7 +409,7 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     }
 
     try {
-      const result = await debitTokensForUser(req.user.id, 1);
+      const result = await debitTokensForUser(req.user.id, 2);
       return res.status(200).json(result);
     } catch (error) {
       if (error instanceof InsufficientTokensError) {

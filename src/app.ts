@@ -19,7 +19,9 @@ import {
   configureTokenWallet,
   debitTokensForUser,
   InsufficientTokensError,
+  requireTokens,
 } from "./services/tokenWallet";
+import { TOKEN_PRICING } from "./services/tokenPricing";
 
 export interface AppDependencies {
   config: AppConfig;
@@ -420,7 +422,7 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
     }
   });
 
-  app.post("/hint", qaRateLimit, auth, planUsageLimiter.limit("hint"), async (req, res) => {
+  const hintHandler: express.RequestHandler = async (req, res) => {
     if (!client) {
       return res.status(500).json({ error: "OpenAI client is not configured" });
     }
@@ -432,7 +434,7 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
         return res.status(401).json({ error: "Unauthorized" });
       }
 
-      logAuthUsage("/hint", token, authUser);
+      logAuthUsage(req.path, token, authUser);
 
       const sessionId = String(req.body?.sessionId ?? "default");
       const instruction = String(req.body?.instruction ?? "").trim();
@@ -528,7 +530,18 @@ export function createApp({ config, db, s3Client }: AppDependencies) {
         res.end();
       }
     }
-  });
+  };
+
+  for (const path of ["/hint", "/api/hint", "/v1/hint", "/hints/stream"]) {
+    app.post(
+      path,
+      qaRateLimit,
+      auth,
+      planUsageLimiter.limit("hint"),
+      requireTokens(TOKEN_PRICING.hintText),
+      hintHandler
+    );
+  }
 
   // Хэндлер: задать вопрос с опциональным транскриптом и обязательной картинкой
 app.post(
@@ -536,6 +549,7 @@ app.post(
   qaRateLimit,
   auth,
   planUsageLimiter.limit("ask"),
+  requireTokens(TOKEN_PRICING.hintWithScreenshot),
   upload.single("image"),
   async (req, res) => {
     // 1) Базовые проверки
@@ -634,6 +648,7 @@ app.post(
     qaRateLimit,
     auth,
     planUsageLimiter.limit("ask"),
+    requireTokens(TOKEN_PRICING.hintWithScreenshot),
     upload.single("image"),
     async (req, res) => {
       if (!client) {

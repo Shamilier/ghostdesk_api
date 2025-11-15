@@ -1,3 +1,4 @@
+import type { NextFunction, Request, Response } from "express";
 import type { AppConfig } from "../config";
 import { logger } from "../lib/logger";
 
@@ -22,6 +23,8 @@ type ConfiguredState = {
 };
 
 let configuredState: ConfiguredState | null = null;
+
+type AuthedRequest = Request & { user?: { id?: string } };
 
 export function configureTokenWallet({ config, fetchImpl }: TokenWalletConfiguration) {
   configuredState = {
@@ -137,5 +140,34 @@ export async function debitTokensForUser(
     error: payload?.error ?? null,
   });
   throw new Error("Failed to debit tokens");
+}
+
+export function requireTokens(cost: number) {
+  return async function requireTokensMiddleware(
+    req: AuthedRequest,
+    res: Response,
+    next: NextFunction
+  ) {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "unauthorized" });
+      }
+
+      const { token_balance } = await debitTokensForUser(userId, cost);
+      (res.locals as any).token_balance = token_balance;
+
+      return next();
+    } catch (err) {
+      if (err instanceof InsufficientTokensError) {
+        return res.status(402).json({
+          error: "insufficient_tokens",
+          message: "У вас недостаточно токенов. Пополните баланс на сайте ghostai.ru.",
+          token_balance: err.tokenBalance,
+        });
+      }
+      return next(err);
+    }
+  };
 }
 
